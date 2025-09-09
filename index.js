@@ -11,22 +11,25 @@ const fetch = require('node-fetch');
 const ytdl = require('ytdl-core');
 const ytSearch = require('yt-search');
 const sharp = require('sharp');
+const playdl = require('play-dl');
 const { spawn } = require('child_process');
 
 const MAX_MB = 16;
 const MAX_BYTES = MAX_MB * 1024 * 1024;
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 async function startDobby() {
   const { state, saveCreds } = await useMultiFileAuthState('dobby_auth');
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: false, // vamos renderizar o QR manualmente
+    printQRInTerminal: false, // QR manual no terminal via qrcode-terminal
     browser: ['Dobby-Bot', 'Chrome', '1.0.0'],
     syncFullHistory: false,
   });
 
-  // === QR code no terminal ===
+  // QR / conexão
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -42,7 +45,7 @@ async function startDobby() {
         console.log('🔁 Tentando reconectar...');
         startDobby();
       } else {
-        console.log('🚪 Sessão deslogada. Exclua a pasta dobby_auth se quiser iniciar novo login.');
+        console.log('🚪 Sessão deslogada. Apague a pasta dobby_auth para um novo login.');
       }
     } else if (connection === 'open') {
       console.log('✅ Conectado ao WhatsApp!');
@@ -51,7 +54,7 @@ async function startDobby() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // === Helpers ===
+  // Helpers
   async function pegarFraseZen() {
     try {
       const res = await fetch('https://zenquotes.io/api/random', {
@@ -69,43 +72,78 @@ async function startDobby() {
     }
   }
 
-  // Baixa áudio do YouTube e corta com ffmpeg (buffer mp3)
-  const processAudio = (url, maxDurationSec) =>
-    new Promise((resolve, reject) => {
-      try {
-        const ffmpegArgs = ['-i', 'pipe:0', '-t', String(maxDurationSec), '-f', 'mp3', 'pipe:1'];
-        const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+  // ========= Pipeline de áudio com fallback (ytdl-core -> play-dl) =========
+  const processAudio = async (url, maxDurationSec) => {
+    const makeFfmpeg = () =>
+      spawn('ffmpeg', ['-i', 'pipe:0', '-t', String(maxDurationSec), '-f', 'mp3', 'pipe:1']);
 
-        const chunks = [];
-        ffmpegProcess.stdout.on('data', (c) => chunks.push(c));
-        ffmpegProcess.stdout.on('end', () => resolve(Buffer.concat(chunks)));
-        ffmpegProcess.on('error', (err) => reject(err));
-        ffmpegProcess.stderr.on('data', (d) => {
-          // útil p/ debug se algo der ruim
-          // console.log('ffmpeg:', d.toString());
-        });
-
-        const stream = ytdl(url, {
+    const tryYTDL = () =>
+      new Promise((resolve, reject) => {
+        const ytdlOpts = {
           filter: 'audioonly',
           quality: 'highestaudio',
-          highWaterMark: 1 << 25, // evita throttling
-        });
+          highWaterMark: 1 << 25,
+          requestOptions: {
+            headers: {
+              'user-agent': UA,
+              ...(process.env.YT_COOKIE ? { cookie: process.env.YT_COOKIE } : {}),
+            },
+          },
+        };
 
-        stream.on('error', (err) => reject(err));
-        stream.pipe(ffmpegProcess.stdin);
-      } catch (err) {
-        reject(err);
+        const ff = makeFfmpeg();
+        const chunks = [];
+        ff.stdout.on('data', (c) => chunks.push(c));
+        ff.stdout.on('end', () => resolve(Buffer.concat(chunks)));
+        ff.on('error', reject);
+        ff.stderr.on('data', () => {}); // habilite logs para debug
+
+        const s = ytdl(url, ytdlOpts);
+        s.on('error', reject);
+        s.pipe(ff.stdin);
+      });
+
+    const tryPlayDL = async () => {
+      try {
+        // Tenta autorização (usa cookies locais se configurados; opcional)
+        await playdl.authorization();
+      } catch (_) {
+        // ignore
       }
-    });
 
-  // === Handlers de mensagens ===
+      const streamInfo = await playdl.stream(url, {
+        discordPlayerCompatibility: false,
+        quality: 2, // 2 = alta
+      });
+
+      return await new Promise((resolve, reject) => {
+        const ff = makeFfmpeg();
+        const chunks = [];
+        ff.stdout.on('data', (c) => chunks.push(c));
+        ff.stdout.on('end', () => resolve(Buffer.concat(chunks)));
+        ff.on('error', reject);
+        ff.stderr.on('data', () => {}); // habilite logs para debug
+
+        streamInfo.stream.on('error', reject).pipe(ff.stdin);
+      });
+    };
+
+    try {
+      return await tryYTDL();
+    } catch (e1) {
+      console.log('ytdl-core falhou, tentando play-dl:', e1?.statusCode || e1?.message || e1);
+      return await tryPlayDL();
+    }
+  };
+
+  // Mensagens
   sock.ev.on('messages.upsert', async (msg) => {
     try {
       const m = msg.messages?.[0];
       if (!m || !m.message || m.key.fromMe) return;
 
       const from = m.key.remoteJid;
-      const sender = m.key.participant || m.key.remoteJid; // grupo ou PV
+      const sender = m.key.participant || m.key.remoteJid;
       const text =
         m.message.conversation ||
         m.message.extendedTextMessage?.text ||
@@ -113,7 +151,7 @@ async function startDobby() {
         '';
       const cmd = text.trim().toLowerCase();
 
-      // ===== Comandos básicos =====
+      // Básicos
       if (cmd === '.ping') {
         await sock.sendMessage(from, { text: '🏓 Pong! Dobby tá na área!' });
         return;
@@ -141,10 +179,9 @@ async function startDobby() {
         return;
       }
 
-      // ===== Frases motivacionais =====
+      // Frases motivacionais
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
         const frase = await pegarFraseZen();
-        // só menciona se for grupo e tiver participant
         const mentionId = m.key.participant || undefined;
         await sock.sendMessage(from, {
           text: `${mentionId ? '@' + mentionId.split('@')[0] + ' ' : ''}${frase} 💪`,
@@ -159,7 +196,6 @@ async function startDobby() {
         await sock.sendMessage(from, { text: `🎵 Procurando: ${query}` });
 
         try {
-          // Se já for URL do YouTube válida, prioriza ela
           let candidates = [];
           if (ytdl.validateURL(query)) {
             candidates = [{ url: query, title: 'Link direto' }];
@@ -179,11 +215,11 @@ async function startDobby() {
           while (!audioBuffer && tries < candidates.length) {
             const video = candidates[tries];
             try {
-              // 150s (2:30) padrão
-              audioBuffer = await processAudio(video.url, 150);
+              audioBuffer = await processAudio(video.url, 150); // 2:30
               picked = video;
             } catch (err) {
-              console.log(`Erro baixando "${video?.title || video?.url}":`, err?.message || err);
+              const code = err?.statusCode || err?.message || err;
+              console.log(`Erro baixando "${video?.title || video?.url}":`, code);
               tries++;
             }
           }
@@ -193,10 +229,11 @@ async function startDobby() {
             return;
           }
 
-          // se ultrapassar 16MB, tenta versão 90s
+          // Reduz tamanho se passar do limite
           if (audioBuffer.length > MAX_BYTES) {
             try {
-              audioBuffer = await processAudio((picked || candidates[tries - 1]).url, 90);
+              const url = (picked || candidates[tries - 1]).url;
+              audioBuffer = await processAudio(url, 90);
               await sock.sendMessage(from, {
                 text: '⚠️ Arquivo grande, enviando versão reduzida (1:30 min)...',
               });
@@ -205,11 +242,10 @@ async function startDobby() {
             }
           }
 
-          // === CONSERTO: enviar buffer direto no campo "audio" ===
           await sock.sendMessage(from, {
             audio: audioBuffer,
             mimetype: 'audio/mpeg',
-            ptt: false, // true para enviar como PTT (áudio de voz)
+            ptt: false,
           });
 
           if (picked?.title) {
@@ -225,8 +261,7 @@ async function startDobby() {
       // ======= .figura =======
       if (cmd === '.figura') {
         try {
-          // tenta pegar a imagem da própria msg
-          let imgMessage =
+          const imgMessage =
             m.message?.imageMessage ||
             m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
             null;
@@ -245,7 +280,6 @@ async function startDobby() {
             return;
           }
 
-          // === CONSERTO: gerar WEBP e enviar buffer diretamente no campo "sticker" ===
           const webpBuffer = await sharp(buffer)
             .resize(512, 512, { fit: 'inside' })
             .webp({ quality: 90 })
@@ -294,7 +328,7 @@ async function startDobby() {
     }
   });
 
-  // Sauda usuário ao entrar/voltar no grupo
+  // Eventos de grupo
   sock.ev.on('group-participants.update', async (update) => {
     try {
       const metadata = await sock.groupMetadata(update.id);
@@ -319,9 +353,9 @@ async function startDobby() {
 
 startDobby();
 
-// ===== Dicas de Deploy (comentários) =====
-// 1) Instale o ffmpeg na VPS (Ubuntu/Debian):
-//    sudo apt update && sudo apt install ffmpeg -y
-// 2) Garanta que as portas de saída estão liberadas (YouTube).
-// 3) Se o ytdl-core bloquear, atualize: npm i ytdl-core@latest
-// 4) Logs úteis: habilite prints do ffmpeg stderr se precisar depurar.
+// ===== Dicas (comentários) =====
+// 1) Instale ffmpeg: sudo apt update && sudo apt install -y ffmpeg
+// 2) Atualize libs: npm i ytdl-core@latest play-dl@latest
+// 3) (Opcional) usar cookie do YouTube p/ vídeos com restrição:
+//    export YT_COOKIE="$(cat yt.cookie)"
+// 4) Debug do ffmpeg: troque ff.stderr.on('data',()=>{}) por console.log(...) quando precisar.
