@@ -232,7 +232,7 @@ async function startDobby() {
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
     '⚡ .ping — teste de vida',
-    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE),
+    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE)',
     '🖼️ .figura — transforma imagem/reply em figurinha',
     '🌞 .bomdia | 🌇 .boatarde | 🌙 .boanoite | 🌃 .boamadrugada — frases estilo Mabel',
     '📅 .eventos — agenda do rolê',
