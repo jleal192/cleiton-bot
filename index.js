@@ -65,7 +65,7 @@ async function startCleiton() {
 
         // Comandos simples
         if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Aqui é o Cleiton." })
-        if (cmd === '.menu') await sock.sendMessage(from, { text: "📋 Menu do Cleiton:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .musica\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento" })
+        if (cmd === '.menu') await sock.sendMessage(from, { text: "📋 Menu do Cleiton:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento" })
 
         // Frases motivacionais
         if ([".bomdia", ".boatarde", ".boanoite", ".boamadrugada"].includes(cmd)) {
