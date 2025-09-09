@@ -4,6 +4,9 @@ const fetch = require('node-fetch');
 const ytdl = require('ytdl-core');
 const ytSearch = require('yt-search');
 const sharp = require('sharp');
+const { spawn } = require('child_process');
+const MAX_MB = 16;
+const MAX_BYTES = MAX_MB * 1024 * 1024;
 
 async function startDobby() {
     const { state, saveCreds } = await useMultiFileAuthState('dobby_auth');
@@ -15,27 +18,27 @@ async function startDobby() {
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode;
             if (reason !== DisconnectReason.loggedOut) {
-                console.log("🔄 Dobby caiu, reconectando...");
+                console.log("🔄 Eita, Dobby caiu! Reconectando...");
                 startDobby();
             } else {
-                console.log("❌ Dobby foi deslogado.");
+                console.log("❌ Dobby foi deslogado, se cuida aí!");
             }
         } else if (connection === 'open') {
-            console.log('✅ Dobby tá online no WhatsApp!');
+            console.log('✅ Eita, Dobby tá ON! Bora zoar o grupo!');
         }
     });
     sock.ev.on('creds.update', saveCreds);
 
-    // Função para frase motivacional
+    // Função para frase motivacional estilo Dobby
     async function pegarFraseZen() {
         try {
             const res = await fetch('https://zenquotes.io/api/random', { headers: { 'User-Agent': 'Mozilla/5.0' } });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             if (!data || !data[0] || !data[0].q || !data[0].a) throw new Error('Resposta inválida da API');
-            return `${data[0].q} — ${data[0].a}`;
+            return `💭 "${data[0].q}" — ${data[0].a}`;
         } catch {
-            return "💡 Mantenha-se motivado hoje!";
+            return "💡 Fica firme, campeão(a)! Dobby acredita em você!";
         }
     }
 
@@ -47,57 +50,77 @@ async function startDobby() {
         const text = m.message.conversation || m.message.extendedTextMessage?.text || "";
         const cmd = text.toLowerCase();
 
-        // Comandos simples
-        if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Aqui é o Dobby." });
-        if (cmd === '.menu') await sock.sendMessage(from, { text: "📋 Menu do Dobby:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento\n👉 .todos" });
+        // Comandos simples com estilo Dobby
+        if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Dobby tá na área, meu chapa!" });
+        if (cmd === '.menu') await sock.sendMessage(from, { text: "📋 Olha só o que o Dobby faz:\n\n👉 .ping – Bora testar se tô vivo\n👉 .menu – Mostra essa belezura\n👉 .help – Me ajuda a te ajudar\n👉 .tocar – Música na veia 🎵\n👉 .figura – Sua foto virando figurinha 🤪\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada – Motivação na veia ✨\n👉 .evento – Agenda do rolê 📅\n👉 .todos – Chama geral 🔊" });
         if (cmd === '.help') await sock.sendMessage(from, { 
-            text: "🆘 Ajuda do Dobby:\n\n" +
-                  "👉 *.ping* – Testa se tô online (respondo Pong 🏓)\n" +
-                  "👉 *.menu* – Mostra o menu rápido\n" +
-                  "👉 *.tocar [nome ou link]* – Baixo e mando a música em áudio 🎶\n" +
-                  "👉 *.figura* – Transformo uma foto em figurinha (manda junto a imagem)\n" +
-                  "👉 *.bomdia / .boatarde / .boanoite / .boamadrugada* – Mando uma frase motivacional ✨\n" +
-                  "👉 *.evento* – Lista os eventos da semana 📅\n" +
-                  "👉 *.todos [mensagem]* – Marca todos do grupo 📢"
+            text: "🆘 Dobby Help Style:\n\n" +
+                  "👉 *.ping* – Testa se tô vivo (respondo Pong 🏓)\n" +
+                  "👉 *.menu* – Mostra o menu estiloso do Dobby\n" +
+                  "👉 *.tocar [nome ou link]* – Vou baixar e mandar a música direto 🎶\n" +
+                  "👉 *.figura* – Sua imagem vai virar figurinha, óóó 🤪\n" +
+                  "👉 *.bomdia / .boatarde / .boanoite / .boamadrugada* – Motivação na hora ✨\n" +
+                  "👉 *.evento* – Agenda do rolê da semana 📅\n" +
+                  "👉 *.todos [mensagem]* – Chama geral do grupo, bora zoar 🔊"
         });
 
-        // Frases motivacionais
+        // Frases motivacionais estilo Dobby
         if ([".bomdia", ".boatarde", ".boanoite", ".boamadrugada"].includes(cmd)) {
             const frase = await pegarFraseZen();
-            await sock.sendMessage(from, { text: `@${m.key.participant?.split('@')[0]} ${frase}`, mentions: [m.key.participant] });
+            await sock.sendMessage(from, { text: `@${m.key.participant?.split('@')[0]} ${frase} 💪 Dobby te dá aquele gás!`, mentions: [m.key.participant] });
         }
 
-        // Música do YouTube
+        // Música do YouTube com limite de tamanho
         if (cmd.startsWith('.tocar ')) {
             const query = text.substring(7).trim();
-            await sock.sendMessage(from, { text: `🎵 Buscando e tocando sua música: ${query}` });
+            await sock.sendMessage(from, { text: `🎵 Segura aí! Dobby tá buscando sua música: ${query}` });
+
             try {
                 const result = await ytSearch(query);
                 const video = result.videos.length > 0 ? result.videos[0] : null;
                 if (!video) {
-                    await sock.sendMessage(from, { text: "❌ Não encontrei a música no YouTube." });
+                    await sock.sendMessage(from, { text: "❌ Ih, não achei essa música não!" });
                     return;
                 }
 
                 const url = video.url;
-                const stream = ytdl(url, { filter: 'audioonly', quality: 'highestaudio' });
-                const chunks = [];
-                stream.on('data', chunk => chunks.push(chunk));
-                stream.on('end', async () => {
-                    const audioBuffer = Buffer.concat(chunks);
-                    await sock.sendMessage(from, { audio: audioBuffer, mimetype: 'audio/mpeg' });
-                });
-                stream.on('error', async (err) => {
-                    console.error("Erro ao baixar áudio:", err);
-                    await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao baixar a música." });
-                });
+
+                const processAudio = (maxDuration) => {
+                    return new Promise((resolve, reject) => {
+                        const ffmpegProcess = spawn('ffmpeg', [
+                            '-i', 'pipe:0',
+                            '-t', maxDuration.toString(),
+                            '-f', 'mp3',
+                            'pipe:1'
+                        ]);
+
+                        const chunks = [];
+                        ffmpegProcess.stdout.on('data', chunk => chunks.push(chunk));
+                        ffmpegProcess.stdout.on('end', () => resolve(Buffer.concat(chunks)));
+                        ffmpegProcess.on('error', reject);
+
+                        const stream = ytdl(url, { filter: 'audioonly', quality: 'highestaudio' });
+                        stream.pipe(ffmpegProcess.stdin);
+                    });
+                };
+
+                let audioBuffer = await processAudio(150); // 2:30 min
+
+                if (audioBuffer.length > MAX_BYTES) {
+                    await sock.sendMessage(from, { text: "⚠️ Arquivo muito grande, enviando versão reduzida (1:30 min)..." });
+                    audioBuffer = await processAudio(90); // 1:30 min
+                }
+
+                await sock.sendMessage(from, { audio: audioBuffer, mimetype: 'audio/mpeg' });
+                await sock.sendMessage(from, { text: "🎧 Música entregue pelo Dobby, pode ouvir aí!" });
+
             } catch (err) {
                 console.error("Erro no .tocar:", err);
                 await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao buscar ou tocar a música." });
             }
         }
 
-        // Figura (sticker)
+        // Figura (sticker) estilo Dobby
         if (cmd === '.figura') {
             try {
                 let buffer;
@@ -116,35 +139,36 @@ async function startDobby() {
                 }
 
                 if (!buffer) {
-                    await sock.sendMessage(from, { text: "❌ Não achei nenhuma imagem para transformar em figurinha." });
+                    await sock.sendMessage(from, { text: "❌ Eita! Não achei nenhuma imagem pra figurinha 😅" });
                     return;
                 }
 
                 const webpBuffer = await sharp(buffer).webp().toBuffer();
                 await sock.sendMessage(from, { sticker: { url: webpBuffer } });
+                await sock.sendMessage(from, { text: "🪄 Tcharam! Figurinha pronta pelo Dobby!" });
             } catch (err) {
                 console.error("Erro no .figura:", err);
-                await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao criar a figurinha." });
+                await sock.sendMessage(from, { text: "❌ Deu ruim criando a figurinha 😭" });
             }
         }
 
-        // Comando .evento
+        // Comando .evento estilo Dobby
         if (cmd === '.evento') {
             const eventos = [
-                "Segunda: Começa tudo de novo!",
-                "Quinta: Quintas Intenções",
-                "Sexta: Happy Hour e Divulga seu trampo aí",
-                "Sábado e Domingo: Encontrão - Parque de Madureira"
+                "Segunda: Segunda é segunda, mas bora lá! 💪",
+                "Quinta: Quintas Intenções - quase sexta! 😎",
+                "Sexta: Happy Hour + Divulga teu trampo! 🍻",
+                "Sábado e Domingo: Encontrão - Parque de Madureira 🌳"
             ];
-            await sock.sendMessage(from, { text: `📅 Eventos da semana:\n\n${eventos.join("\n")}` });
+            await sock.sendMessage(from, { text: `📅 Agenda do rolê:\n\n${eventos.join("\n")}` });
         }
 
-        // Comando .todos
+        // Comando .todos estilo Dobby
         if (cmd.startsWith('.todos')) {
             try {
                 const metadata = await sock.groupMetadata(from);
                 const participants = metadata.participants.map(p => p.id);
-                const mensagem = text.replace('.todos', '').trim() || "📢 Chamando todo mundo!";
+                const mensagem = text.replace('.todos', '').trim() || "📢 Bora todo mundo ouvir o Dobby!";
                 await sock.sendMessage(from, { text: mensagem, mentions: participants });
             } catch (err) {
                 console.error("Erro no .todos:", err);
@@ -152,15 +176,15 @@ async function startDobby() {
         }
     });
 
-    // Entrada/saída de participantes
+    // Entrada/saída de participantes estilo Dobby
     sock.ev.on('group-participants.update', async (update) => {
         try {
             const metadata = await sock.groupMetadata(update.id);
             for (const participant of update.participants) {
                 if (update.action === 'add') {
-                    await sock.sendMessage(update.id, { text: `👋 Bem-vindo(a), @${participant.split('@')[0]} ao grupo *${metadata.subject}*!`, mentions: [participant] });
+                    await sock.sendMessage(update.id, { text: `👋 E aí @${participant.split('@')[0]}, chegou chegando no grupo *${metadata.subject}*! 😎`, mentions: [participant] });
                 } else if (update.action === 'invite') {
-                    await sock.sendMessage(update.id, { text: `🙌 Bem-vindo(a) de volta, @${participant.split('@')[0]}!`, mentions: [participant] });
+                    await sock.sendMessage(update.id, { text: `🙌 Olha quem voltou! @${participant.split('@')[0]} 😏`, mentions: [participant] });
                 }
             }
         } catch (err) {
