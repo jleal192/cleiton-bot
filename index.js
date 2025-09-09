@@ -12,7 +12,13 @@ async function startDobby() {
 
     // Evento: conexão
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update
+        const { connection, lastDisconnect, qr } = update
+
+        if (qr) {
+            console.log('📲 Escaneie este QR code com seu WhatsApp:')
+            qrcode.generate(qr, { small: true })
+        }
+
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode
             if (reason !== DisconnectReason.loggedOut) {
@@ -32,19 +38,11 @@ async function startDobby() {
     async function pegarFraseZen() {
         try {
             const res = await fetch('https://zenquotes.io/api/random', {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-                }
+                headers: { 'User-Agent': 'Mozilla/5.0' }
             })
-
             if (!res.ok) throw new Error(`HTTP ${res.status}`)
-
             const data = await res.json()
-
-            if (!data || !data[0] || !data[0].q || !data[0].a)
-                throw new Error('Resposta inválida da API')
-
-            return `${data[0].q} — ${data[0].a}`
+            return data[0]?.q && data[0]?.a ? `${data[0].q} — ${data[0].a}` : "💡 Mantenha-se motivado hoje!"
         } catch (err) {
             console.error('Erro ao buscar frase Zen:', err)
             return "💡 Mantenha-se motivado hoje!"
@@ -57,7 +55,6 @@ async function startDobby() {
         if (!m.message || m.key.fromMe) return
         const from = m.key.remoteJid
         const text = m.message.conversation || m.message.extendedTextMessage?.text || ""
-
         const cmd = text.toLowerCase()
 
         // Comandos simples
@@ -86,44 +83,28 @@ async function startDobby() {
             await sock.sendMessage(from, { text: `@${m.key.participant?.split('@')[0]} ${frase}`, mentions: [m.key.participant] })
         }
 
-        // Música do YouTube usando yt-search com envio em streaming
+        // Música do YouTube
         if (cmd.startsWith('.tocar ')) {
             const query = text.substring(7).trim()
-            await sock.sendMessage(from, { text: `🎵 Buscando e tocando sua música: ${query}` })
-
+            await sock.sendMessage(from, { text: `🎵 Buscando sua música: ${query}` })
             try {
                 const result = await ytSearch(query)
-                const video = result.videos.length > 0 ? result.videos[0] : null
-                if (!video) {
-                    await sock.sendMessage(from, { text: "❌ Não encontrei a música no YouTube." })
-                    return
-                }
-
-                const url = video.url
-                const stream = ytdl(url, { filter: 'audioonly' })
-
-                await sock.sendMessage(from, { 
-                    audio: stream, 
-                    mimetype: 'audio/mpeg', 
-                    fileName: `${video.title}.mp3` 
-                })
-
+                const video = result.videos[0]
+                if (!video) return await sock.sendMessage(from, { text: "❌ Não encontrei a música." })
+                const stream = ytdl(video.url, { filter: 'audioonly' })
+                await sock.sendMessage(from, { audio: stream, mimetype: 'audio/mpeg', fileName: `${video.title}.mp3` })
             } catch (err) {
                 console.error(err)
-                await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao buscar ou tocar a música." })
+                await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao tocar a música." })
             }
         }
 
         // Figura (sticker)
         if (cmd === '.figura') {
-            let buffer;
-
-            // 1️⃣ Se a mensagem tem imagem direta
+            let buffer
             if (m.message.imageMessage) {
                 buffer = await sock.downloadMediaMessage(m)
-            } 
-            // 2️⃣ Se a mensagem é resposta a uma imagem
-            else if (m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
+            } else if (m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
                 buffer = await sock.downloadMediaMessage({
                     key: {
                         remoteJid: from,
@@ -133,8 +114,6 @@ async function startDobby() {
                     message: m.message.extendedTextMessage.contextInfo.quotedMessage
                 })
             }
-
-            // Se conseguiu pegar o buffer, envia como sticker
             if (buffer) {
                 await sock.sendMessage(from, { sticker: buffer })
             } else {
@@ -158,13 +137,8 @@ async function startDobby() {
             try {
                 const metadata = await sock.groupMetadata(from)
                 const participants = metadata.participants.map(p => p.id)
-
                 const mensagem = text.replace('.todos', '').trim() || "📢 Chamando todo mundo!"
-
-                await sock.sendMessage(from, { 
-                    text: mensagem, 
-                    mentions: participants 
-                })
+                await sock.sendMessage(from, { text: mensagem, mentions: participants })
             } catch (err) {
                 console.error("Erro no .todos:", err)
             }
@@ -178,8 +152,6 @@ async function startDobby() {
             for (const participant of update.participants) {
                 if (update.action === 'add') {
                     await sock.sendMessage(update.id, { text: `👋 Bem-vindo(a), @${participant.split('@')[0]} ao grupo *${metadata.subject}*!`, mentions: [participant] })
-                } else if (update.action === 'remove') {
-                    // não faz nada ao sair
                 } else if (update.action === 'invite') {
                     await sock.sendMessage(update.id, { text: `🙌 Bem-vindo(a) de volta, @${participant.split('@')[0]}!`, mentions: [participant] })
                 }
