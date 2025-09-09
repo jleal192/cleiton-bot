@@ -41,7 +41,11 @@ async function pegarFraseZen() {
     const en = `${data?.[0]?.q} — ${data?.[0]?.a}`;
 
     // traduz para PT-BR via API livre
-    const tr = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(en) + "&langpair=en|pt-BR");
+    const tr = await fetch(
+      'https://api.mymemory.translated.net/get?q=' +
+        encodeURIComponent(en) +
+        '&langpair=en|pt-BR'
+    );
     const trJson = await tr.json();
     const translated = trJson?.responseData?.translatedText || en;
 
@@ -68,15 +72,20 @@ function execSpawn(cmd, args, opts = {}) {
   });
 }
 
-// Baixar áudio de um URL do YouTube
+// Baixar áudio de um URL do YouTube (com suporte a cookies.txt)
 async function baixarAudioMP3(url, maxDurationSec = 150, targetBitrate = '128k') {
+  const cookiesPath = path.join(__dirname, 'cookies.txt');
+
   const ytdlpArgs = [
-    '-f', 'bestaudio/best',
+    '-f',
+    'bestaudio/best',
     '--no-playlist',
     '--geo-bypass',
     '--force-ipv4',
     '--no-warnings',
-    '-o', '-',
+    ...(fs.existsSync(cookiesPath) ? ['--cookies', cookiesPath] : []), // usa cookies se existir
+    '-o',
+    '-',
     url,
   ];
 
@@ -87,30 +96,40 @@ async function baixarAudioMP3(url, maxDurationSec = 150, targetBitrate = '128k')
   const outFile = tempFile('.mp3');
   return new Promise((resolve, reject) => {
     const ytdlp = spawn('yt-dlp', ytdlpArgs, {
-      env: { ...process.env, 'HTTP_USER_AGENT': userAgent },
+      env: { ...process.env, HTTP_USER_AGENT: userAgent },
     });
 
     const ffmpegArgs = [
-      '-hide_banner', '-loglevel', 'error',
-      '-i', 'pipe:0',
-      '-t', String(maxDurationSec),
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      'pipe:0',
+      '-t',
+      String(maxDurationSec),
       '-vn',
-      '-ac', '2',
-      '-ar', '44100',
-      '-b:a', targetBitrate,
-      '-f', 'mp3',
+      '-ac',
+      '2',
+      '-ar',
+      '44100',
+      '-b:a',
+      targetBitrate,
+      '-f',
+      'mp3',
       outFile,
     ];
     const ffmpegProc = spawn('ffmpeg', ffmpegArgs);
 
     let stderrF = '';
-    ytdlp.stderr.on('data', (d) => {});
+    ytdlp.stderr.on('data', () => {});
     ffmpegProc.stderr.on('data', (d) => (stderrF += d.toString()));
 
     ytdlp.stdout.pipe(ffmpegProc.stdin);
 
     ffmpegProc.on('close', (code) => {
-      try { ytdlp.kill('SIGKILL'); } catch {}
+      try {
+        ytdlp.kill('SIGKILL');
+      } catch {}
       if (code !== 0) return reject(new Error(`ffmpeg falhou: ${stderrF}`));
       try {
         const buf = fs.readFileSync(outFile);
@@ -137,7 +156,8 @@ async function baixarPorBusca(query, tentativaDurSeg = [150, 120, 90]) {
     for (const dur of tentativaDurSeg) {
       try {
         const buf = await baixarAudioMP3(v.url, dur, '128k');
-        if (buf && buf.length > 0) return { buffer: buf, title: v.title, url: v.url };
+        if (buf && buf.length > 0)
+          return { buffer: buf, title: v.title, url: v.url };
       } catch (e) {
         lastErr = e;
       }
@@ -151,13 +171,20 @@ async function criarFigurinha(sock, m, from) {
   let buffer;
 
   if (m.message?.imageMessage) {
-    const stream = await downloadContentFromMessage(m.message.imageMessage, 'image');
+    const stream = await downloadContentFromMessage(
+      m.message.imageMessage,
+      'image'
+    );
     buffer = Buffer.concat([]);
     for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
   }
 
-  if (!buffer && m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
-    const quoted = m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
+  if (
+    !buffer &&
+    m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage
+  ) {
+    const quoted =
+      m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
     const stream = await downloadContentFromMessage(quoted, 'image');
     buffer = Buffer.concat([]);
     for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
@@ -185,7 +212,9 @@ async function startDobby() {
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect } = update;
     if (connection === 'close') {
-      const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message;
+      const reason =
+        lastDisconnect?.error?.output?.statusCode ||
+        lastDisconnect?.error?.message;
       console.log(`⚠️ Conexão fechada: ${reason}`);
       if (reason !== DisconnectReason.loggedOut) {
         console.log('🔁 Tentando reconectar...');
@@ -261,7 +290,9 @@ async function startDobby() {
       if (cmd.startsWith('.tocar ')) {
         const query = text.slice(7).trim();
         if (!query) {
-          await sock.sendMessage(from, { text: '❗ Use: `.tocar <música/artista>`' });
+          await sock.sendMessage(from, {
+            text: '❗ Use: `.tocar <música/artista>`',
+          });
           return;
         }
         await sock.sendMessage(from, { text: `🎵 Procurando: *${query}*…` });
@@ -275,27 +306,47 @@ async function startDobby() {
             const tmpOut = tempFile('.out.mp3');
             fs.writeFileSync(tmpIn, audioBuffer);
             await execSpawn('ffmpeg', [
-              '-hide_banner', '-loglevel', 'error',
-              '-t', '90',
-              '-i', tmpIn,
-              '-vn', '-ac', '2', '-ar', '44100',
-              '-b:a', '96k', '-f', 'mp3',
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-t',
+              '90',
+              '-i',
+              tmpIn,
+              '-vn',
+              '-ac',
+              '2',
+              '-ar',
+              '44100',
+              '-b:a',
+              '96k',
+              '-f',
+              'mp3',
               tmpOut,
             ]);
             audioBuffer = fs.readFileSync(tmpOut);
             fs.unlink(tmpIn, () => {});
             fs.unlink(tmpOut, () => {});
-            await sock.sendMessage(from, { text: '⚠️ Arquivo grande — enviando versão reduzida (1:30 min)…' });
+            await sock.sendMessage(from, {
+              text: '⚠️ Arquivo grande — enviando versão reduzida (1:30 min)…',
+            });
           }
 
-          await sock.sendMessage(from, { audio: audioBuffer, mimetype: 'audio/mpeg' });
+          await sock.sendMessage(from, {
+            audio: audioBuffer,
+            mimetype: 'audio/mpeg',
+          });
           await sock.sendMessage(from, { text: `🎧 Aqui está: *${title}*` });
         } catch (err) {
           const msg = String(err?.message || err);
           if (/consent|not a bot|410|sign in/i.test(msg)) {
-            await sock.sendMessage(from, { text: '❌ O YouTube bloqueou essa busca.\n↪️ Tente outro título/versão (ao vivo, lyric, etc).' });
+            await sock.sendMessage(from, {
+              text: '❌ O YouTube bloqueou essa busca.\n↪️ Tente outro título/versão (ao vivo, lyric, etc).',
+            });
           } else {
-            await sock.sendMessage(from, { text: '❌ Erro ao buscar ou tocar música 😭' });
+            await sock.sendMessage(from, {
+              text: '❌ Erro ao buscar ou tocar música 😭',
+            });
           }
           console.error('Erro no .tocar:', msg);
         }
@@ -307,7 +358,9 @@ async function startDobby() {
           await criarFigurinha(sock, m, from);
         } catch (err) {
           console.error('Erro no .figura:', err?.message || err);
-          await sock.sendMessage(from, { text: '❌ Deu erro criando a figurinha 😭' });
+          await sock.sendMessage(from, {
+            text: '❌ Deu erro criando a figurinha 😭',
+          });
         }
         return;
       }
@@ -329,16 +382,22 @@ async function startDobby() {
         try {
           const metadata = await sock.groupMetadata(from);
           const participants = metadata.participants.map((p) => p.id);
-          const mensagem = text.replace('.todos', '').trim() || '📢 Bora todo mundo ouvir o Dobby!';
+          const mensagem =
+            text.replace('.todos', '').trim() ||
+            '📢 Bora todo mundo ouvir o Dobby!';
           await sock.sendMessage(from, { text: mensagem, mentions: participants });
         } catch {
-          await sock.sendMessage(from, { text: '❌ Esse comando só funciona em grupos.' });
+          await sock.sendMessage(from, {
+            text: '❌ Esse comando só funciona em grupos.',
+          });
         }
         return;
       }
 
       if (cmd === '.tocar') {
-        await sock.sendMessage(from, { text: '❗ Use: `.tocar <música/artista>`' });
+        await sock.sendMessage(from, {
+          text: '❗ Use: `.tocar <música/artista>`',
+        });
       }
     } catch (e) {
       console.error('Erro geral:', e?.message || e);
