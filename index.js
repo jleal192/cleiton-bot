@@ -3,7 +3,6 @@ const qrcode = require('qrcode-terminal')
 const fetch = require('node-fetch')
 const ytdl = require('ytdl-core')
 const fs = require('fs')
-const { exec } = require('child_process')
 
 // Função principal
 async function startCleiton() {
@@ -44,10 +43,16 @@ async function startCleiton() {
     async function baixarMusica(query, filename) {
         return new Promise(async (resolve, reject) => {
             try {
-                const url = ytdl.getURLVideoID(query).then(id => `https://www.youtube.com/watch?v=${id}`)
+                const search = await ytdl.getInfo(query).catch(() => null)
+                let url = query
+                if (!ytdl.validateURL(query) && search?.videoDetails?.video_url) {
+                    url = search.videoDetails.video_url
+                }
+
                 const stream = ytdl(url, { filter: 'audioonly' })
                 stream.pipe(fs.createWriteStream(filename))
                 stream.on('end', () => resolve())
+                stream.on('error', (err) => reject(err))
             } catch (err) {
                 reject(err)
             }
@@ -65,7 +70,23 @@ async function startCleiton() {
 
         // Comandos simples
         if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Aqui é o Cleiton." })
-        if (cmd === '.menu') await sock.sendMessage(from, { text: "📋 Menu do Cleiton:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento" })
+
+        if (cmd === '.menu') await sock.sendMessage(from, { 
+            text: "📋 Menu do Cleiton:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento\n👉 .todos" 
+        })
+
+        if (cmd === '.help') {
+            await sock.sendMessage(from, { 
+                text: "🆘 Ajuda do Cleiton:\n\n" +
+                      "👉 *.ping* – Testa se tô online (respondo Pong 🏓)\n" +
+                      "👉 *.menu* – Mostra o menu rápido\n" +
+                      "👉 *.tocar [nome ou link]* – Baixo e mando a música em áudio 🎶\n" +
+                      "👉 *.figura* – Transformo uma foto em figurinha (manda junto a imagem)\n" +
+                      "👉 *.bomdia / .boatarde / .boanoite / .boamadrugada* – Mando uma frase motivacional ✨\n" +
+                      "👉 *.evento* – Lista os eventos da semana 📅\n" +
+                      "👉 *.todos [mensagem]* – Marca todos do grupo 📢"
+            })
+        }
 
         // Frases motivacionais
         if ([".bomdia", ".boatarde", ".boanoite", ".boamadrugada"].includes(cmd)) {
@@ -74,8 +95,8 @@ async function startCleiton() {
         }
 
         // Música do YouTube
-        if (cmd.startsWith('.musica ')) {
-            const query = text.substring(8).trim()
+        if (cmd.startsWith('.tocar ')) {
+            const query = text.substring(7).trim()
             const fileName = `musica.mp3`
             await sock.sendMessage(from, { text: `🎵 Baixando sua música: ${query}` })
             try {
@@ -91,6 +112,34 @@ async function startCleiton() {
         if (cmd === '.figura' && m.message.imageMessage) {
             const buffer = await sock.downloadMediaMessage(m)
             await sock.sendMessage(from, { sticker: buffer })
+        }
+
+        // Comando .evento
+        if (cmd === '.evento') {
+            const eventos = [
+                "Segunda: Começa tudo de novo!",
+                "Quinta: Quintas Intenções",
+                "Sexta: Happy Hour e Divulga seu trampo aí",
+                "Sábado: Encontrão - Parque de Madureira"
+            ]
+            await sock.sendMessage(from, { text: `📅 Eventos da semana:\n\n${eventos.join("\n")}` })
+        }
+
+        // Comando .todos
+        if (cmd.startsWith('.todos')) {
+            try {
+                const metadata = await sock.groupMetadata(from)
+                const participants = metadata.participants.map(p => p.id)
+
+                const mensagem = text.replace('.todos', '').trim() || "📢 Chamando todo mundo!"
+
+                await sock.sendMessage(from, { 
+                    text: mensagem, 
+                    mentions: participants 
+                })
+            } catch (err) {
+                console.error("Erro no .todos:", err)
+            }
         }
     })
 
@@ -109,25 +158,6 @@ async function startCleiton() {
             }
         } catch (err) {
             console.error(err)
-        }
-    })
-
-    // Comando .evento (você vai precisar popular com eventos manualmente ou via API depois)
-    sock.ev.on('messages.upsert', async (msg) => {
-        const m = msg.messages[0]
-        if (!m.message || m.key.fromMe) return
-        const from = m.key.remoteJid
-        const text = m.message.conversation || m.message.extendedTextMessage?.text || ""
-
-        if (text.toLowerCase() === '.evento') {
-            const eventos = [
-                "Segunda: Treino às 18h",
-                "Terça: Reunião de equipe às 14h",
-                "Quarta: Live às 20h",
-                "Quinta: Estudo às 19h",
-                "Sexta: Happy Hour às 17h"
-            ]
-            await sock.sendMessage(from, { text: `📅 Eventos da semana:\n\n${eventos.join("\n")}` })
         }
     })
 }
