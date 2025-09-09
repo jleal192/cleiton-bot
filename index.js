@@ -5,6 +5,7 @@ const ytdl = require('ytdl-core');
 const ytSearch = require('yt-search');
 const sharp = require('sharp');
 const { spawn } = require('child_process');
+
 const MAX_MB = 16;
 const MAX_BYTES = MAX_MB * 1024 * 1024;
 
@@ -57,7 +58,7 @@ async function startDobby() {
             text: "🆘 Dobby Help Style:\n\n" +
                   "👉 *.ping* – Testa se tô vivo (respondo Pong 🏓)\n" +
                   "👉 *.menu* – Mostra o menu estiloso do Dobby\n" +
-                  "👉 *.tocar [nome ou link]* – Vou baixar e mandar a música direto 🎶\n" +
+                  "👉 *.tocar [nome do cantor e música]* – Vou baixar e mandar a música direto 🎶\n" +
                   "👉 *.figura* – Sua imagem vai virar figurinha, óóó 🤪\n" +
                   "👉 *.bomdia / .boatarde / .boanoite / .boamadrugada* – Motivação na hora ✨\n" +
                   "👉 *.evento* – Agenda do rolê da semana 📅\n" +
@@ -94,11 +95,11 @@ async function startDobby() {
                 let audioBuffer;
                 while (video) {
                     try {
+                        await sock.sendMessage(from, { text: `⬇️ Baixando: ${video.title}...` });
                         audioBuffer = await processAudio(video.url, 150);
-                        break; // sucesso
+                        break;
                     } catch (err) {
                         if (err?.statusCode === 410) {
-                            // tenta o próximo vídeo
                             video = result.videos.find(v => v.url !== video.url);
                             if (!video) throw new Error('Nenhum vídeo disponível');
                         } else throw err;
@@ -110,7 +111,7 @@ async function startDobby() {
                     audioBuffer = await processAudio(video.url, 90);
                 }
 
-                await sock.sendMessage(from, { audio: audioBuffer, mimetype: 'audio/mpeg' });
+                await sock.sendMessage(from, { audio: audioBuffer, mimetype: 'audio/mpeg', fileName: `${video.title}.mp3` });
                 await sock.sendMessage(from, { text: "🎧 Música entregue pelo Dobby, pode ouvir aí!" });
             } catch (err) {
                 console.error("Erro no .tocar:", err);
