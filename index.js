@@ -232,12 +232,11 @@ async function startDobby() {
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
     '⚡ .ping — teste de vida',
-    '🎧 .tocar <música/artista> — baixa e manda o áudio (até 2:30)',
+    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE),
     '🖼️ .figura — transforma imagem/reply em figurinha',
-    '🌞 .bomdia | 🌇 .boatarde | 🌙 .boanoite | 🌃 .boamadrugada — frase zen',
+    '🌞 .bomdia | 🌇 .boatarde | 🌙 .boanoite | 🌃 .boamadrugada — frases estilo Mabel',
     '📅 .eventos — agenda do rolê',
     '📣 .todos [mensagem] — menciona geral (grupos)',
-    '🆘 .help — ver ajuda',
   ].join('\n');
 
   const HELP_TXT = [
