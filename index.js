@@ -2,11 +2,12 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const qrcode = require('qrcode-terminal')
 const fetch = require('node-fetch')
 const ytdl = require('ytdl-core')
+const ytSearch = require('yt-search')
 const fs = require('fs')
 
 // Função principal
-async function startCleiton() {
-    const { state, saveCreds } = await useMultiFileAuthState('cleiton_auth')
+async function startDobby() {
+    const { state, saveCreds } = await useMultiFileAuthState('dobby_auth')
     const sock = makeWASocket({ auth: state })
 
     // Evento: conexão
@@ -15,48 +16,39 @@ async function startCleiton() {
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode
             if (reason !== DisconnectReason.loggedOut) {
-                console.log("🔄 Cleiton caiu, reconectando...")
-                startCleiton()
+                console.log("🔄 Dobby caiu, reconectando...")
+                startDobby()
             } else {
-                console.log("❌ Cleiton foi deslogado.")
+                console.log("❌ Dobby foi deslogado.")
             }
         } else if (connection === 'open') {
-            console.log('✅ Cleiton tá online no WhatsApp!')
+            console.log('✅ Dobby tá online no WhatsApp!')
         }
     })
 
     sock.ev.on('creds.update', saveCreds)
 
-    // Função para pegar frase motivacional
+    // Função para pegar frase motivacional do ZenQuotes
     async function pegarFraseZen() {
         try {
-            const res = await fetch('https://zenquotes.io/api/random')
+            const res = await fetch('https://zenquotes.io/api/random', {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+                }
+            })
+
+            if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
             const data = await res.json()
+
+            if (!data || !data[0] || !data[0].q || !data[0].a)
+                throw new Error('Resposta inválida da API')
+
             return `${data[0].q} — ${data[0].a}`
         } catch (err) {
-            console.error('Erro ao buscar frase:', err)
+            console.error('Erro ao buscar frase Zen:', err)
             return "💡 Mantenha-se motivado hoje!"
         }
-    }
-
-    // Função para baixar música do YouTube
-    async function baixarMusica(query, filename) {
-        return new Promise(async (resolve, reject) => {
-            try {
-                const search = await ytdl.getInfo(query).catch(() => null)
-                let url = query
-                if (!ytdl.validateURL(query) && search?.videoDetails?.video_url) {
-                    url = search.videoDetails.video_url
-                }
-
-                const stream = ytdl(url, { filter: 'audioonly' })
-                stream.pipe(fs.createWriteStream(filename))
-                stream.on('end', () => resolve())
-                stream.on('error', (err) => reject(err))
-            } catch (err) {
-                reject(err)
-            }
-        })
     }
 
     // Evento: mensagens recebidas
@@ -69,15 +61,15 @@ async function startCleiton() {
         const cmd = text.toLowerCase()
 
         // Comandos simples
-        if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Aqui é o Cleiton." })
+        if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Aqui é o Dobby." })
 
         if (cmd === '.menu') await sock.sendMessage(from, { 
-            text: "📋 Menu do Cleiton:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento\n👉 .todos" 
+            text: "📋 Menu do Dobby:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento\n👉 .todos" 
         })
 
         if (cmd === '.help') {
             await sock.sendMessage(from, { 
-                text: "🆘 Ajuda do Cleiton:\n\n" +
+                text: "🆘 Ajuda do Dobby:\n\n" +
                       "👉 *.ping* – Testa se tô online (respondo Pong 🏓)\n" +
                       "👉 *.menu* – Mostra o menu rápido\n" +
                       "👉 *.tocar [nome ou link]* – Baixo e mando a música em áudio 🎶\n" +
@@ -94,24 +86,60 @@ async function startCleiton() {
             await sock.sendMessage(from, { text: `@${m.key.participant?.split('@')[0]} ${frase}`, mentions: [m.key.participant] })
         }
 
-        // Música do YouTube
+        // Música do YouTube usando yt-search com envio em streaming
         if (cmd.startsWith('.tocar ')) {
             const query = text.substring(7).trim()
-            const fileName = `musica.mp3`
-            await sock.sendMessage(from, { text: `🎵 Baixando sua música: ${query}` })
+            await sock.sendMessage(from, { text: `🎵 Buscando e tocando sua música: ${query}` })
+
             try {
-                await baixarMusica(query, fileName)
-                await sock.sendMessage(from, { audio: fs.readFileSync(fileName), mimetype: 'audio/mpeg' })
-                fs.unlinkSync(fileName)
-            } catch {
-                await sock.sendMessage(from, { text: "❌ Não consegui baixar a música." })
+                const result = await ytSearch(query)
+                const video = result.videos.length > 0 ? result.videos[0] : null
+                if (!video) {
+                    await sock.sendMessage(from, { text: "❌ Não encontrei a música no YouTube." })
+                    return
+                }
+
+                const url = video.url
+                const stream = ytdl(url, { filter: 'audioonly' })
+
+                await sock.sendMessage(from, { 
+                    audio: stream, 
+                    mimetype: 'audio/mpeg', 
+                    fileName: `${video.title}.mp3` 
+                })
+
+            } catch (err) {
+                console.error(err)
+                await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao buscar ou tocar a música." })
             }
         }
 
         // Figura (sticker)
-        if (cmd === '.figura' && m.message.imageMessage) {
-            const buffer = await sock.downloadMediaMessage(m)
-            await sock.sendMessage(from, { sticker: buffer })
+        if (cmd === '.figura') {
+            let buffer;
+
+            // 1️⃣ Se a mensagem tem imagem direta
+            if (m.message.imageMessage) {
+                buffer = await sock.downloadMediaMessage(m)
+            } 
+            // 2️⃣ Se a mensagem é resposta a uma imagem
+            else if (m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
+                buffer = await sock.downloadMediaMessage({
+                    key: {
+                        remoteJid: from,
+                        id: m.message.extendedTextMessage.contextInfo.stanzaId,
+                        fromMe: false
+                    },
+                    message: m.message.extendedTextMessage.contextInfo.quotedMessage
+                })
+            }
+
+            // Se conseguiu pegar o buffer, envia como sticker
+            if (buffer) {
+                await sock.sendMessage(from, { sticker: buffer })
+            } else {
+                await sock.sendMessage(from, { text: "❌ Não achei nenhuma imagem para transformar em figurinha." })
+            }
         }
 
         // Comando .evento
@@ -162,4 +190,4 @@ async function startCleiton() {
     })
 }
 
-startCleiton()
+startDobby()
