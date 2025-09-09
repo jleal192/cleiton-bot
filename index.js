@@ -45,16 +45,6 @@ async function startDobby() {
         }
     }
 
-    // Função para baixar música do YouTube
-    async function baixarMusica(url, filename) {
-        return new Promise((resolve, reject) => {
-            const stream = ytdl(url, { filter: 'audioonly' })
-            stream.pipe(fs.createWriteStream(filename))
-            stream.on('end', () => resolve())
-            stream.on('error', (err) => reject(err))
-        })
-    }
-
     // Evento: mensagens recebidas
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0]
@@ -65,7 +55,9 @@ async function startDobby() {
 
         // Comandos simples
         if (cmd === '.ping') await sock.sendMessage(from, { text: "🏓 Pong! Aqui é o Dobby." })
-        if (cmd === '.menu') await sock.sendMessage(from, { text: "📋 Menu do Dobby:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento\n👉 .todos" })
+        if (cmd === '.menu') await sock.sendMessage(from, { 
+            text: "📋 Menu do Dobby:\n\n👉 .ping\n👉 .menu\n👉 .help\n👉 .tocar\n👉 .figura\n👉 .bomdia/.boatarde/.boanoite/.boamadrugada\n👉 .evento\n👉 .todos" 
+        })
         if (cmd === '.help') await sock.sendMessage(from, { 
             text: "🆘 Ajuda do Dobby:\n\n" +
                   "👉 *.ping* – Testa se tô online (respondo Pong 🏓)\n" +
@@ -86,20 +78,27 @@ async function startDobby() {
         // Música do YouTube
         if (cmd.startsWith('.tocar ')) {
             const query = text.substring(7).trim()
-            await sock.sendMessage(from, { text: `🎵 Buscando sua música: ${query}` })
+            await sock.sendMessage(from, { text: `🎵 Buscando e tocando sua música: ${query}` })
+
             try {
                 const result = await ytSearch(query)
-                const video = result.videos[0]
-                if (!video) return await sock.sendMessage(from, { text: "❌ Música não encontrada." })
+                const video = result.videos.length > 0 ? result.videos[0] : null
+                if (!video) {
+                    await sock.sendMessage(from, { text: "❌ Não encontrei a música no YouTube." })
+                    return
+                }
 
                 const url = video.url
-                const filename = `musica.mp3`
-                await baixarMusica(url, filename)
-                await sock.sendMessage(from, { audio: fs.readFileSync(filename), mimetype: 'audio/mpeg' })
-                fs.unlinkSync(filename)
+                const fileName = `musica.mp3`
+                const stream = ytdl(url, { filter: 'audioonly' })
+                stream.pipe(fs.createWriteStream(fileName))
+                stream.on('end', async () => {
+                    await sock.sendMessage(from, { audio: fs.readFileSync(fileName), mimetype: 'audio/mpeg' })
+                    fs.unlinkSync(fileName)
+                })
             } catch (err) {
                 console.error(err)
-                await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao tocar a música." })
+                await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao buscar ou tocar a música." })
             }
         }
 
@@ -110,23 +109,25 @@ async function startDobby() {
                 if (m.message.imageMessage) {
                     buffer = await sock.downloadMediaMessage(m)
                 } else if (m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
-                    const quoted = {
+                    const quoted = m.message.extendedTextMessage.contextInfo
+                    buffer = await sock.downloadMediaMessage({
                         key: {
                             remoteJid: from,
-                            id: m.message.extendedTextMessage.contextInfo.stanzaId,
+                            id: quoted.stanzaId,
                             fromMe: false
                         },
-                        message: m.message.extendedTextMessage.contextInfo.quotedMessage
-                    }
-                    buffer = await sock.downloadMediaMessage(quoted)
+                        message: quoted.quotedMessage
+                    })
                 }
-                if (buffer) {
-                    await sock.sendMessage(from, { sticker: buffer })
-                } else {
-                    await sock.sendMessage(from, { text: "❌ Nenhuma imagem encontrada para figurinha." })
+
+                if (!buffer) {
+                    await sock.sendMessage(from, { text: "❌ Não achei nenhuma imagem para transformar em figurinha." })
+                    return
                 }
+
+                await sock.sendMessage(from, { sticker: buffer })
             } catch (err) {
-                console.error('Erro ao criar figurinha:', err)
+                console.error("Erro no .figura:", err)
                 await sock.sendMessage(from, { text: "❌ Ocorreu um erro ao criar a figurinha." })
             }
         }
@@ -163,7 +164,7 @@ async function startDobby() {
                 if (update.action === 'add') {
                     await sock.sendMessage(update.id, { text: `👋 Bem-vindo(a), @${participant.split('@')[0]} ao grupo *${metadata.subject}*!`, mentions: [participant] })
                 } else if (update.action === 'remove') {
-                    // não faz nada
+                    // não faz nada ao sair
                 } else if (update.action === 'invite') {
                     await sock.sendMessage(update.id, { text: `🙌 Bem-vindo(a) de volta, @${participant.split('@')[0]}!`, mentions: [participant] })
                 }
