@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fetch = require('node-fetch');
 const ytdl = require('ytdl-core');
@@ -132,36 +132,45 @@ async function startDobby() {
         }
 
         // Figura (sticker) estilo Dobby
-        if (cmd === '.figura') {
-            try {
-                let buffer;
-                if (m.message.imageMessage) {
-                    buffer = await sock.downloadMediaMessage(m);
-                } else if (m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
-                    const quoted = m.message.extendedTextMessage.contextInfo;
-                    buffer = await sock.downloadMediaMessage({
-                        key: {
-                            remoteJid: from,
-                            id: quoted.stanzaId,
-                            fromMe: false
-                        },
-                        message: quoted.quotedMessage
-                    });
-                }
+if (cmd === '.figura') {
+    try {
+        let buffer;
 
-                if (!buffer) {
-                    await sock.sendMessage(from, { text: "❌ Eita! Não achei nenhuma imagem pra figurinha 😅" });
-                    return;
-                }
+        // Se a própria mensagem tem imagem
+        if (m.message.imageMessage) {
+            const stream = await downloadContentFromMessage(m.message.imageMessage, 'image');
+            buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+            }
 
-                const webpBuffer = await sharp(buffer).webp().toBuffer();
-                await sock.sendMessage(from, { sticker: { url: webpBuffer } });
-                await sock.sendMessage(from, { text: "🪄 Tcharam! Figurinha pronta pelo Dobby!" });
-            } catch (err) {
-                console.error("Erro no .figura:", err);
-                await sock.sendMessage(from, { text: "❌ Deu ruim criando a figurinha 😭" });
+        // Se é reply em imagem
+        } else if (m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
+            const quoted = m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
+            const stream = await downloadContentFromMessage(quoted, 'image');
+            buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
             }
         }
+
+        // Nenhuma imagem encontrada
+        if (!buffer || buffer.length === 0) {
+            await sock.sendMessage(from, { text: "❌ Eita! Não achei nenhuma imagem pra figurinha 😅" });
+            return;
+        }
+
+        // Converter para WebP
+        const webpBuffer = await sharp(buffer).webp().toBuffer();
+        await sock.sendMessage(from, { sticker: { url: webpBuffer } });
+        await sock.sendMessage(from, { text: "🪄 Tcharam! Figurinha pronta pelo Dobby!" });
+
+    } catch (err) {
+        console.error("Erro no .figura:", err);
+        await sock.sendMessage(from, { text: "❌ Deu ruim criando a figurinha 😭" });
+    }
+}
+
 
         // Comando .evento estilo Dobby
         if (cmd === '.evento') {
