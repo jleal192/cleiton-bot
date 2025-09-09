@@ -1,4 +1,7 @@
-// index.js
+// Dobby Bot — versão yt-dlp + ffmpeg (sem play-dl / ytdl-core)
+// Stack: Baileys + yt-dlp + ffmpeg + sharp
+// Observação: certifique-se de ter yt-dlp e ffmpeg instalados no servidor.
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -6,54 +9,214 @@ const {
   downloadContentFromMessage,
 } = require('@whiskeysockets/baileys');
 
-const qrcode = require('qrcode-terminal');
 const fetch = require('node-fetch');
-const ytdl = require('ytdl-core');
 const ytSearch = require('yt-search');
 const sharp = require('sharp');
-const playdl = require('play-dl');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-// aumenta o limite de listeners (evita MaxListenersExceededWarning)
-require('events').EventEmitter.defaultMaxListeners = 30;
+// Evita warning de MaxListenersExceeded
+require('events').defaultMaxListeners = 30;
 
 const MAX_MB = 16;
 const MAX_BYTES = MAX_MB * 1024 * 1024;
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-// caminho opcional para cookies (Netscape cookies.txt)
-const COOKIE_PATH = path.join(__dirname, 'yt.cookie');
+// ==== Helpers gerais =========================================================
+
+function tempFile(suffix = '') {
+  const name = `dobby_${Date.now()}_${Math.random().toString(36).slice(2)}${suffix}`;
+  return path.join(os.tmpdir(), name);
+}
+
+async function pegarFraseZen() {
+  try {
+    const res = await fetch('https://zenquotes.io/api/random', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (DobbyBot)' },
+      timeout: 12_000,
+    });
+    const data = await res.json();
+    return `💭 "${data?.[0]?.q}" — ${data?.[0]?.a}`;
+  } catch {
+    return '💡 Fica firme, campeão(a)! Dobby acredita em você!';
+  }
+}
+
+// Executa um comando e resolve quando termina, opcionalmente capturando stdout/stderr
+function execSpawn(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+
+    p.stdout.on('data', (d) => (stdout = Buffer.concat([stdout, d])));
+    p.stderr.on('data', (d) => (stderr = Buffer.concat([stderr, d])));
+    p.on('error', reject);
+    p.on('close', (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${cmd} exited with ${code}: ${stderr.toString()}`));
+    });
+  });
+}
+
+// Baixa áudio de um URL do YouTube para MP3 com limite de duração (segundos)
+// Estratégia: yt-dlp (stream) -> ffmpeg (corta, converte p/ mp3) -> arquivo temporário
+async function baixarAudioMP3(url, maxDurationSec = 150, targetBitrate = '128k') {
+  // Flags que ajudam contra bloqueios geográficos/anti-bot básicos
+  const ytdlpArgs = [
+    '-f', 'bestaudio/best',
+    '--no-playlist',
+    '--geo-bypass',
+    '--force-ipv4',
+    '--no-warnings',
+    '-o', '-', // stdout
+    url,
+  ];
+
+  // Força um user-agent “real” (ajuda no 410/consent)
+  const userAgent = process.env.YTDLP_USER_AGENT ||
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+  // pipeline: yt-dlp stdout -> ffmpeg stdin -> mp3 em arquivo
+  const outFile = tempFile('.mp3');
+  return new Promise((resolve, reject) => {
+    const ytdlp = spawn('yt-dlp', ytdlpArgs, {
+      env: { ...process.env, 'HTTP_USER_AGENT': userAgent },
+    });
+
+    // ffmpeg: limita tempo e bitrate, normaliza para mp3
+    const ffmpegArgs = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-i', 'pipe:0',
+      '-t', String(maxDurationSec),
+      '-vn',
+      '-ac', '2',
+      '-ar', '44100',
+      '-b:a', targetBitrate,
+      '-f', 'mp3',
+      outFile,
+    ];
+    const ffmpegProc = spawn('ffmpeg', ffmpegArgs);
+
+    let stderrY = '';
+    let stderrF = '';
+
+    ytdlp.stderr.on('data', (d) => (stderrY += d.toString()));
+    ffmpegProc.stderr.on('data', (d) => (stderrF += d.toString()));
+
+    ytdlp.on('error', (e) => {
+      ffmpegProc.kill('SIGKILL');
+      reject(e);
+    });
+    ffmpegProc.on('error', (e) => {
+      ytdlp.kill('SIGKILL');
+      reject(e);
+    });
+
+    ytdlp.stdout.pipe(ffmpegProc.stdin);
+
+    ffmpegProc.on('close', (code) => {
+      // Encerrar yt-dlp também
+      try { ytdlp.kill('SIGKILL'); } catch {}
+      if (code !== 0) {
+        return reject(new Error(`ffmpeg falhou: ${stderrF || 'sem log'}`));
+      }
+      // lê arquivo em buffer
+      try {
+        const buf = fs.readFileSync(outFile);
+        fs.unlink(outFile, () => {});
+        resolve(buf);
+      } catch (err) {
+        reject(err);
+      }
+    });
+
+    // se o yt-dlp encerrar antes do ffmpeg escrever algo
+    ytdlp.on('close', (code) => {
+      // se fechou muito rápido e ffmpeg não terminou, ok; o close do ffmpeg resolve a promessa
+      if (code !== 0) {
+        // Pode ser 410/consent; ffmpeg fechará sem entrada válida
+        // Deixamos o ffmpeg desaguar; se falhar, a promessa já rejeita acima
+      }
+    });
+  });
+}
+
+// Tenta baixar várias alternativas do resultado de busca até funcionar
+async function baixarPorBusca(query, tentativaDurSeg = [150, 120, 90]) {
+  const result = await ytSearch(query);
+  const vids = (result && result.videos) || [];
+  if (!vids.length) throw new Error('Nenhum vídeo encontrado');
+
+  // Tenta um punhado de vídeos do topo
+  const maxCandidates = Math.min(6, vids.length);
+  let lastErr = null;
+
+  for (let i = 0; i < maxCandidates; i++) {
+    const v = vids[i];
+    for (const dur of tentativaDurSeg) {
+      try {
+        const buf = await baixarAudioMP3(v.url, dur, '128k');
+        if (buf && buf.length > 0) return { buffer: buf, title: v.title, url: v.url };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  throw lastErr || new Error('Falhou em todas as tentativas');
+}
+
+// Converte imagem (mensagem ou citada) em webp e manda como figurinha
+async function criarFigurinha(sock, m, from) {
+  let buffer;
+
+  // imagem direta
+  if (m.message?.imageMessage) {
+    const stream = await downloadContentFromMessage(m.message.imageMessage, 'image');
+    buffer = Buffer.concat([]);
+    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+  }
+
+  // imagem citada
+  if (!buffer && m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
+    const quoted = m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
+    const stream = await downloadContentFromMessage(quoted, 'image');
+    buffer = Buffer.concat([]);
+    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+  }
+
+  if (!buffer || buffer.length === 0) {
+    await sock.sendMessage(from, { text: '❌ Nenhuma imagem encontrada 😅' });
+    return;
+  }
+
+  // Converte para webp (sticker)
+  const webpBuffer = await sharp(buffer).webp({ quality: 90 }).toBuffer();
+  await sock.sendMessage(from, { sticker: webpBuffer });
+  await sock.sendMessage(from, { text: '🪄 Figurinha pronta!' });
+}
+
+// ==== Bot ====================================================================
 
 async function startDobby() {
   const { state, saveCreds } = await useMultiFileAuthState('dobby_auth');
-
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: false,
-    browser: ['Dobby-Bot', 'Chrome', '1.0.0'],
-    syncFullHistory: false,
+    printQRInTerminal: true,
+    // Baileys logado como Web – padrão
   });
 
-  // QR / conexão
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('📲 Escaneie o QR para logar:');
-      qrcode.generate(qr, { small: true });
-    }
-
+    const { connection, lastDisconnect } = update;
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message;
-      console.log('⚠️ Conexão fechada:', reason);
+      console.log(`⚠️ Conexão fechada: ${reason}`);
       if (reason !== DisconnectReason.loggedOut) {
         console.log('🔁 Tentando reconectar...');
         startDobby();
-      } else {
-        console.log('🚪 Sessão deslogada. Apague a pasta dobby_auth para um novo login.');
       }
     } else if (connection === 'open') {
       console.log('✅ Conectado ao WhatsApp!');
@@ -62,298 +225,129 @@ async function startDobby() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // ========= Helpers =========
-  async function pegarFraseZen() {
+  // Menus com emoji
+  const MENU_TXT =
+    [
+      '🧙‍♂️ **Dobby Menu**',
+      '━━━━━━━━━━━━━━',
+      '⚡ .ping — teste de vida',
+      '🎧 .tocar <música/artista> — baixa e manda o áudio (até 2:30)',
+      '🖼️ .figura — transforma imagem/reply em figurinha',
+      '🌞 .bomdia | 🌇 .boatarde | 🌙 .boanoite | 🌃 .boamadrugada — frase zen',
+      '📅 .eventos — agenda do rolê',
+      '📣 .todos [mensagem] — menciona geral (grupos)',
+      '🆘 .help — ver ajuda',
+    ].join('\n');
+
+  const HELP_TXT =
+    [
+      '🆘 **Ajuda do Dobby**',
+      '━━━━━━━━━━━━━━',
+      '• Use `.tocar` com nome da música/artista. Ex: `.tocar pentatonix hallelujah`',
+      '• Para `.figura`, envie uma imagem ou responda uma imagem com `.figura`',
+      `• Limite de tamanho de áudio: ${MAX_MB} MB (~2:30 min).`,
+      '• Em grupo, `.todos Sua mensagem` chama a tropa inteira.',
+    ].join('\n');
+
+  sock.ev.on('messages.upsert', async (ev) => {
+    const m = ev.messages?.[0];
+    if (!m || !m.message || m.key.fromMe) return;
+
+    const from = m.key.remoteJid;
+    const text =
+      m.message?.conversation ||
+      m.message?.extendedTextMessage?.text ||
+      m.message?.imageMessage?.caption ||
+      '';
+    const cmd = text.trim().toLowerCase();
+
     try {
-      const res = await fetch('https://zenquotes.io/api/random', {
-        headers: { 'User-Agent': 'Mozilla/5.0 (DobbyBot)' },
-        timeout: 12_000,
-      });
-      const data = await res.json();
-      if (Array.isArray(data) && data[0]?.q && data[0]?.a) {
-        return `💭 "${data[0].q}" — ${data[0].a}`;
-      }
-      return '💡 Fica firme, campeão(a)! Dobby acredita em você!';
-    } catch (e) {
-      console.error('Erro pegarFraseZen:', e?.message || e);
-      return '💡 Fica firme, campeão(a)! Dobby acredita em você!';
-    }
-  }
-
-  // ========= Pipeline de áudio: ytdl-core -> play-dl -> yt-dlp =========
-  const processAudio = async (url, maxDurationSec) => {
-    const makeFfmpeg = () =>
-      spawn('ffmpeg', ['-i', 'pipe:0', '-t', String(maxDurationSec), '-f', 'mp3', 'pipe:1']);
-
-    // 1) ytdl-core
-    const tryYTDL = () =>
-      new Promise((resolve, reject) => {
-        const ytdlOpts = {
-          filter: 'audioonly',
-          quality: 'highestaudio',
-          highWaterMark: 1 << 25,
-          requestOptions: {
-            headers: {
-              'user-agent': UA,
-              ...(process.env.YT_COOKIE ? { cookie: process.env.YT_COOKIE } : {}),
-            },
-          },
-        };
-
-        const ff = makeFfmpeg();
-        const chunks = [];
-        ff.stdout.on('data', (c) => chunks.push(c));
-        ff.stdout.on('end', () => resolve(Buffer.concat(chunks)));
-        ff.on('error', reject);
-        // para debug: descomente abaixo
-        // ff.stderr.on('data', d => console.log('ffmpeg(ytdl):', d.toString()));
-
-        const s = ytdl(url, ytdlOpts);
-        s.on('error', reject);
-        s.pipe(ff.stdin);
-      });
-
-    // 2) play-dl (sem authorization interativa)
-    const tryPlayDL = async () => {
-      const streamInfo = await playdl.stream(url, {
-        quality: 2, // alta
-        // Algumas versões do play-dl suportam cookie nas options; se a sua suportar:
-        // cookie: process.env.YT_COOKIE
-      });
-
-      return await new Promise((resolve, reject) => {
-        const ff = makeFfmpeg();
-        const chunks = [];
-        ff.stdout.on('data', (c) => chunks.push(c));
-        ff.stdout.on('end', () => resolve(Buffer.concat(chunks)));
-        ff.on('error', reject);
-        // ff.stderr.on('data', d => console.log('ffmpeg(play-dl):', d.toString()));
-
-        streamInfo.stream.on('error', reject).pipe(ff.stdin);
-      });
-    };
-
-    // 3) yt-dlp (CLI) — tanque de guerra
-    const tryYtDlp = () =>
-      new Promise((resolve, reject) => {
-        const args = [
-          '-f',
-          // 'bestaudio/best', // pode gerar formatos variados
-          '140', // m4a-aac estável (geralmente disponível)
-          '-o',
-          '-', // saída em stdout
-          '--no-playlist',
-          '--quiet',
-          '--no-warnings',
-          '--user-agent',
-          UA,
-        ];
-
-        if (fs.existsSync(COOKIE_PATH)) {
-          // utiliza cookies Netscape direto
-          args.push('--cookies', COOKIE_PATH);
-        }
-
-        args.push(url);
-
-        const y = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-        const ff = makeFfmpeg();
-        const chunks = [];
-        ff.stdout.on('data', (c) => chunks.push(c));
-        ff.stdout.on('end', () => resolve(Buffer.concat(chunks)));
-        ff.on('error', reject);
-        // ff.stderr.on('data', d => console.log('ffmpeg(yt-dlp):', d.toString()));
-
-        y.stdout.on('error', reject).pipe(ff.stdin);
-        y.stderr.on('data', (d) => {
-          const msg = d.toString();
-          // console.log('yt-dlp:', msg); // habilite p/ debug
-        });
-        y.on('error', reject);
-        y.on('close', (code) => {
-          if (code !== 0) {
-            reject(new Error(`yt-dlp exited with code ${code}`));
-          }
-        });
-      });
-
-    // Orquestração
-    try {
-      return await tryYTDL();
-    } catch (e1) {
-      console.log('ytdl-core falhou, tentando play-dl:', e1?.statusCode || e1?.message || e1);
-      try {
-        return await tryPlayDL();
-      } catch (e2) {
-        console.log('play-dl falhou, tentando yt-dlp:', e2?.message || e2);
-        return await tryYtDlp();
-      }
-    }
-  };
-
-  // ========= Mensagens =========
-  sock.ev.on('messages.upsert', async (msg) => {
-    try {
-      const m = msg.messages?.[0];
-      if (!m || !m.message || m.key.fromMe) return;
-
-      const from = m.key.remoteJid;
-      const sender = m.key.participant || m.key.remoteJid;
-      const text =
-        m.message.conversation ||
-        m.message.extendedTextMessage?.text ||
-        m.message.imageMessage?.caption ||
-        '';
-      const cmd = text.trim().toLowerCase();
-
-      // ======= Básicos =======
+      // ping / menu / help
       if (cmd === '.ping') {
-        await sock.sendMessage(from, { text: '🏓 Pong! Dobby tá na área!' });
+        await sock.sendMessage(from, { text: '🏓 Pong! Dobby online.' });
         return;
       }
-
       if (cmd === '.menu') {
-        await sock.sendMessage(from, {
-          text:
-            '📋 *Menu do Dobby*\n\n' +
-            '🎵 *.tocar* _[nome/url]_ — baixa e envia áudio do YouTube\n' +
-            '🖼️ *.figura* — responda uma *imagem* com esse comando para virar *sticker*\n' +
-            '🌞 *.bomdia*  | 🌤️ *.boatarde*  | 🌙 *.boanoite*  | 🌌 *.boamadrugada*\n' +
-            '📅 *.evento* — agenda do rolê\n' +
-            '📣 *.todos* _[mensagem]_ — menciona geral (somente em grupos)\n' +
-            '🆘 *.help* — exemplos e dicas\n',
-        });
+        await sock.sendMessage(from, { text: MENU_TXT });
         return;
       }
-
       if (cmd === '.help') {
-        await sock.sendMessage(from, {
-          text:
-            '🆘 *Ajuda do Dobby*\n\n' +
-            '• Exemplo de música: `*.tocar dividido thiaguinho*`\n' +
-            '• Link direto YouTube também funciona: `*.tocar https://youtu.be/...*`\n' +
-            '• Para *sticker*: envie uma imagem e responda com `*.figura*`\n' +
-            '• Se o áudio ficar grande, envio versão reduzida ⏱️\n' +
-            '• Dicas: se o vídeo for bloqueado por idade/região, o dono pode adicionar cookies do YouTube no servidor.\n',
-        });
+        await sock.sendMessage(from, { text: HELP_TXT });
         return;
       }
 
-      // ======= Frases motivacionais =======
+      // frases zen
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
         const frase = await pegarFraseZen();
-        const mentionId = m.key.participant || undefined;
+        const mention = m.key.participant || m.participant || m.pushName;
+        const tag = mention?.split('@')?.[0];
         await sock.sendMessage(from, {
-          text: `${mentionId ? '@' + mentionId.split('@')[0] + ' ' : ''}${frase} 💪`,
-          mentions: mentionId ? [mentionId] : [],
+          text: `@${tag} ${frase} 💪`,
+          mentions: mention ? [mention] : [],
         });
         return;
       }
 
-      // ======= .tocar =======
+      // tocar
       if (cmd.startsWith('.tocar ')) {
-        const query = text.substring(7).trim();
-        await sock.sendMessage(from, { text: `🎵 Procurando: *${query}*` });
+        const query = text.slice(7).trim();
+        if (!query) {
+          await sock.sendMessage(from, { text: '❗ Use: `.tocar <música/artista>`' });
+          return;
+        }
+
+        await sock.sendMessage(from, { text: `🎵 Procurando: *${query}* (até 2:30 min)…` });
 
         try {
-          let candidates = [];
-          if (ytdl.validateURL(query)) {
-            candidates = [{ url: query, title: 'Link direto' }];
-          } else {
-            const result = await ytSearch(query);
-            if (!result?.videos?.length) {
-              await sock.sendMessage(from, { text: '❌ Não achei essa música!' });
-              return;
-            }
-            candidates = result.videos;
+          const { buffer, title } = await baixarPorBusca(query);
+
+          // Se passou do limite do WhatsApp, re-encoda menor
+          let audioBuffer = buffer;
+          if (audioBuffer.length > MAX_BYTES) {
+            // Tenta recortar para 90s a 96k
+            const tmpIn = tempFile('.in.mp3');
+            const tmpOut = tempFile('.out.mp3');
+            fs.writeFileSync(tmpIn, audioBuffer);
+            await execSpawn('ffmpeg', [
+              '-hide_banner', '-loglevel', 'error',
+              '-t', '90',
+              '-i', tmpIn,
+              '-vn',
+              '-ac', '2',
+              '-ar', '44100',
+              '-b:a', '96k',
+              '-f', 'mp3',
+              tmpOut,
+            ]);
+            audioBuffer = fs.readFileSync(tmpOut);
+            fs.unlink(tmpIn, () => {});
+            fs.unlink(tmpOut, () => {});
+            await sock.sendMessage(from, { text: '⚠️ Arquivo grande — enviando versão reduzida (1:30 min)…' });
           }
 
-          let audioBuffer = null;
-          let picked = null;
-          let tries = 0;
-
-          while (!audioBuffer && tries < candidates.length) {
-            const video = candidates[tries];
-            try {
-              audioBuffer = await processAudio(video.url, 150); // 2:30
-              picked = video;
-            } catch (err) {
-              const code = err?.statusCode || err?.message || err;
-              console.log(`Erro baixando "${video?.title || video?.url}":`, code);
-              tries++;
-            }
-          }
-
-          if (!audioBuffer) {
+          await sock.sendMessage(from, { audio: audioBuffer, mimetype: 'audio/mpeg' });
+          await sock.sendMessage(from, { text: `🎧 Aqui está: *${title}*` });
+        } catch (err) {
+          const msg = String(err?.message || err);
+          // Sinais clássicos de bloqueio do YouTube
+          if (/consent|not a bot|410|sign in/i.test(msg)) {
             await sock.sendMessage(from, {
               text:
-                '❌ Não consegui baixar nenhum vídeo 😭\n' +
-                '💡 Tenta outro termo ou envia o *link direto* do YouTube.',
+                '❌ O YouTube deu bloqueio anti-bot nessa busca.\n' +
+                '↪️ Tenta um título/versão diferente (ao vivo, lyric, etc).',
             });
-            return;
+          } else {
+            await sock.sendMessage(from, { text: '❌ Erro ao buscar ou tocar música 😭' });
           }
-
-          // Reduz tamanho se passar do limite
-          if (audioBuffer.length > MAX_BYTES) {
-            try {
-              const url = (picked || candidates[tries - 1]).url;
-              audioBuffer = await processAudio(url, 90);
-              await sock.sendMessage(from, {
-                text: '⚠️ Arquivo grande, enviando versão reduzida (1:30 min)...',
-              });
-            } catch (e) {
-              console.log('Falhou na redução de tamanho:', e?.message || e);
-            }
-          }
-
-          await sock.sendMessage(from, {
-            audio: audioBuffer,
-            mimetype: 'audio/mpeg',
-            ptt: false, // true => manda como PTT (voz)
-          });
-
-          if (picked?.title) {
-            await sock.sendMessage(from, { text: `🎧 Aqui está: *${picked.title}*` });
-          }
-        } catch (err) {
-          console.error('Erro no .tocar:', err?.message || err);
-          await sock.sendMessage(from, { text: '❌ Erro ao buscar ou tocar música 😭' });
+          console.error('Erro no .tocar:', msg);
         }
         return;
       }
 
-      // ======= .figura =======
+      // figura
       if (cmd === '.figura') {
         try {
-          const imgMessage =
-            m.message?.imageMessage ||
-            m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
-            null;
-
-          if (!imgMessage) {
-            await sock.sendMessage(from, {
-              text: '❌ Nenhuma imagem encontrada 😅\n↪️ Envie uma *imagem* e responda com *.figura*',
-            });
-            return;
-          }
-
-          const stream = await downloadContentFromMessage(imgMessage, 'image');
-          let buffer = Buffer.concat([]);
-          for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-
-          if (!buffer?.length) {
-            await sock.sendMessage(from, { text: '❌ Falha ao ler imagem 😅' });
-            return;
-          }
-
-          const webpBuffer = await sharp(buffer)
-            .resize(512, 512, { fit: 'inside' })
-            .webp({ quality: 90 })
-            .toBuffer();
-
-          await sock.sendMessage(from, { sticker: webpBuffer });
-          await sock.sendMessage(from, { text: '🪄 Figurinha pronta!' });
+          await criarFigurinha(sock, m, from);
         } catch (err) {
           console.error('Erro no .figura:', err?.message || err);
           await sock.sendMessage(from, { text: '❌ Deu ruim criando a figurinha 😭' });
@@ -361,43 +355,44 @@ async function startDobby() {
         return;
       }
 
-      // ======= .evento =======
-      if (cmd === '.evento') {
+      // eventos
+      if (cmd === '.eventos') {
         const eventos = [
-          '📅 *Agenda do rolê*',
-          '• Segunda: Segunda é segunda, mas bora lá! 💪',
-          '• Quinta: Quintas Intenções — quase sexta! 😎',
-          '• Sexta: Happy Hour + Divulga teu trampo! 🍻',
-          '• Sábado & Domingo: Encontrão — Parque de Madureira 🌳',
-        ];
-        await sock.sendMessage(from, { text: eventos.join('\n') });
+          '📅 **Agenda do rolê**',
+          '━━━━━━━━━━━━━━',
+          '💪 Segunda: Bora começar no gás!',
+          '😎 Quinta: Quintas Intenções — quase sexta!',
+          '🍻 Sexta: Happy Hour + Divulga teu trampo!',
+          '🌳 Sábado & Domingo: Encontrão — Parque de Madureira',
+        ].join('\n');
+        await sock.sendMessage(from, { text: eventos });
         return;
       }
 
-      // ======= .todos =======
+      // todos (somente grupo)
       if (cmd.startsWith('.todos')) {
         try {
-          const isGroup = from.endsWith('@g.us');
-          if (!isGroup) {
-            await sock.sendMessage(from, { text: '❌ Comando disponível apenas em *grupos*.' });
-            return;
-          }
           const metadata = await sock.groupMetadata(from);
           const participants = metadata.participants.map((p) => p.id);
-          const mensagem =
-            text.replace('.todos', '').trim() || '📢 Bora todo mundo ouvir o Dobby!';
+          const mensagem = text.replace('.todos', '').trim() || '📢 Bora todo mundo ouvir o Dobby!';
           await sock.sendMessage(from, { text: mensagem, mentions: participants });
         } catch (err) {
+          // não é grupo ou falha em obter metadata
           console.error('Erro no .todos:', err?.message || err);
+          await sock.sendMessage(from, { text: '❌ Esse comando só funciona em grupos.' });
         }
         return;
       }
+
+      // fallback: se o usuário só mandou ".tocar", ajuda
+      if (cmd === '.tocar') {
+        await sock.sendMessage(from, { text: '❗ Use: `.tocar <música/artista>`' });
+      }
     } catch (e) {
-      console.error('Erro geral no messages.upsert:', e?.message || e);
+      console.error('Erro geral:', e?.message || e);
     }
   });
 
-  // Eventos de grupo
   sock.ev.on('group-participants.update', async (update) => {
     try {
       const metadata = await sock.groupMetadata(update.id);
@@ -415,20 +410,9 @@ async function startDobby() {
         }
       }
     } catch (err) {
-      console.error('Erro em group-participants.update:', err?.message || err);
+      console.error(err);
     }
   });
 }
 
 startDobby();
-
-/*
-Dicas:
-1) FFmpeg: sudo apt install -y ffmpeg
-2) yt-dlp: sudo apt install -y yt-dlp  (ou instalar binário oficial como no topo)
-3) Cookies (opcional p/ vídeos restritos):
-   - Formato Netscape (cookies.txt) em ~/dobby-bot/yt.cookie  -> usado automaticamente no yt-dlp
-   - OU export YT_COOKIE="cookie1=...; cookie2=..." para ytdl-core/play-dl e reinicie:
-     pm2 restart dobby --update-env
-4) Debug do ffmpeg: descomente as linhas ff.stderr.on('data', ...).
-*/
