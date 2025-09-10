@@ -46,18 +46,14 @@ async function pegarFraseZen() {
     const data = await res.json();
     const en = `${data?.[0]?.q} — ${data?.[0]?.a}`;
 
-    // Traduz via API MyMemory (força PT-BR)
+    // Traduz via API MyMemory
     const tr = await fetch(
       'https://api.mymemory.translated.net/get?q=' +
         encodeURIComponent(en) +
         '&langpair=en|pt-BR'
     );
     const trJson = await tr.json();
-    let translated = trJson?.responseData?.translatedText;
-
-    if (!translated || translated.trim().length < 3) {
-      translated = '💡 Continue firme, você é capaz de vencer qualquer desafio!';
-    }
+    const translated = trJson?.responseData?.translatedText || en;
 
     return `💭 ${translated}`;
   } catch {
@@ -65,29 +61,39 @@ async function pegarFraseZen() {
   }
 }
 
-// Baixar áudio (yt-dlp + ffmpeg)
-async function baixarAudioMP3(url, maxDurationSec = 150) {
+// Executa comando (spawn)
+function execSpawn(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+
+    p.stdout.on('data', (d) => (stdout = Buffer.concat([stdout, d])));
+    p.stderr.on('data', (d) => (stderr = Buffer.concat([stderr, d])));
+    p.on('error', reject);
+    p.on('close', (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${cmd} exited with ${code}: ${stderr.toString()}`));
+    });
+  });
+}
+
+// Baixar áudio de um URL do YouTube
+async function baixarAudioMP3(url, maxDurationSec = 150, targetBitrate = '128k') {
   const outFile = tempFile('.mp3');
   return new Promise((resolve, reject) => {
-    const ytdlp = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', url]);
-    const ffmpeg = spawn('ffmpeg', [
-      '-i', 'pipe:0',
-      '-t', String(maxDurationSec),
-      '-vn',
-      '-ac', '2',
-      '-ar', '44100',
-      '-b:a', '128k',
-      '-f', 'mp3',
-      outFile,
+    const ytdlp = spawn('yt-dlp', ['-f','bestaudio','-o','-', url]);
+    const ffmpegProc = spawn('ffmpeg', [
+      '-i','pipe:0','-t',String(maxDurationSec),
+      '-vn','-ac','2','-ar','44100','-b:a',targetBitrate,
+      '-f','mp3',outFile,
     ]);
-
-    ytdlp.stdout.pipe(ffmpeg.stdin);
-
-    ffmpeg.on('close', (code) => {
-      if (code !== 0) return reject(new Error("ffmpeg falhou"));
+    ytdlp.stdout.pipe(ffmpegProc.stdin);
+    ffmpegProc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`ffmpeg falhou`));
       try {
         const buf = fs.readFileSync(outFile);
-        fs.unlinkSync(outFile);
+        fs.unlink(outFile, () => {});
         resolve(buf);
       } catch (err) { reject(err); }
     });
@@ -103,7 +109,7 @@ async function baixarPorBusca(query, tentativaDurSeg = [150, 120, 90]) {
   for (let v of vids.slice(0, 5)) {
     for (const dur of tentativaDurSeg) {
       try {
-        const buf = await baixarAudioMP3(v.url, dur);
+        const buf = await baixarAudioMP3(v.url, dur, '128k');
         if (buf) return { buffer: buf, title: v.title };
       } catch {}
     }
@@ -175,7 +181,7 @@ async function startDobby() {
   const MENU_TXT = [
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
-    '🎧 .tocar <música/artista> — baixa e toca música direto do YouTube\n',
+    '🎧 .tocar <música/artista> — toca áudio do YouTube\n',
     '🖼️ .figura — transforma imagem/reply em figurinha\n',
     '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel\n',
     '📅 .eventos — agenda do rolê\n',
@@ -217,12 +223,67 @@ async function startDobby() {
       if (cmd.startsWith('.tocar ')) {
         try {
           const query = text.slice(7).trim();
+          if (!query) {
+            return sock.sendMessage(from, { text: '❗ Use: `.tocar <música/artista>`' });
+          }
+
+          await sock.sendMessage(from, { text: `🎵 Procurando: *${query}*…` });
+
           const { buffer, title } = await baixarPorBusca(query);
-          await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
-          await sock.sendMessage(from,{ text: `🎧 ${title}` });
+          let audioBuffer = buffer;
+
+          // 🔒 Verifica tamanho
+          if (audioBuffer.length > MAX_BYTES) {
+            const tmpIn = tempFile('.in.mp3');
+            const tmpOut = tempFile('.out.mp3');
+            fs.writeFileSync(tmpIn, audioBuffer);
+
+            try {
+              await execSpawn('ffmpeg', [
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-t', '120',            // corta para 2 min
+                '-i', tmpIn,
+                '-vn',
+                '-ac', '2',
+                '-ar', '44100',
+                '-b:a', '96k',          // bitrate menor
+                '-f', 'mp3',
+                tmpOut,
+              ]);
+
+              audioBuffer = fs.readFileSync(tmpOut);
+              await sock.sendMessage(from, {
+                text: '⚠️ Arquivo muito grande — enviando versão reduzida (~2 min)…',
+              });
+            } catch (err) {
+              console.error('Erro ao cortar áudio:', err);
+            } finally {
+              fs.unlink(tmpIn, () => {});
+              fs.unlink(tmpOut, () => {});
+            }
+          }
+
+          // Envia áudio
+          await sock.sendMessage(from, {
+            audio: audioBuffer,
+            mimetype: 'audio/mpeg',
+          });
+          await sock.sendMessage(from, { text: `🎧 Aqui está: *${title}*` });
+
         } catch (err) {
-          console.error("Erro no .tocar:", err.message);
-          sock.sendMessage(from,{ text:'❌ Erro ao tocar, tenta outro nome/título' });
+          const msg = String(err?.message || err);
+          console.error('Erro no .tocar:', msg);
+
+          if (/consent|not a bot|410|sign in/i.test(msg)) {
+            await sock.sendMessage(from, {
+              text: '❌ O YouTube bloqueou essa busca.\n↪️ Tente outro título/versão (ao vivo, lyric, etc).',
+            });
+          } else {
+            await sock.sendMessage(from, {
+              text: '❌ Erro ao buscar ou tocar música 😭',
+            });
+          }
         }
       }
 
