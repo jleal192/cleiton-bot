@@ -45,7 +45,17 @@ async function pegarFraseZen() {
     const res = await fetch('https://zenquotes.io/api/random');
     const data = await res.json();
     const en = `${data?.[0]?.q} — ${data?.[0]?.a}`;
-    return `💭 ${en}`;
+
+    // Traduz via API MyMemory
+    const tr = await fetch(
+      'https://api.mymemory.translated.net/get?q=' +
+        encodeURIComponent(en) +
+        '&langpair=en|pt-BR'
+    );
+    const trJson = await tr.json();
+    const translated = trJson?.responseData?.translatedText || en;
+
+    return `💭 ${translated}`;
   } catch {
     return '💡 Continue firme, você é capaz de vencer qualquer desafio!';
   }
@@ -203,7 +213,6 @@ async function startDobby() {
     }
 
     try {
-      if (cmd === '.ping') return sock.sendMessage(from,{ text: '🏓 Pong! Dobby online.' });
       if (cmd === '.menu') return sock.sendMessage(from,{ text: MENU_TXT });
 
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
@@ -267,9 +276,9 @@ async function startDobby() {
         return sock.sendMessage(from,{ text: nivers[user] ? `🎂 Seu aniversário: ${nivers[user]}` : "❌ Você não cadastrou. Use `.niver DD/MM`" });
       }
 
-      // Carioca bolado
+      // Carioca bolado (se marcar o Dobby no grupo)
       const mentions = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-      if (mentions.includes(sock.user.id)) {
+      if (mentions.some(jid => jid.includes(sock.user.id.split(':')[0]))) {
         const resp = respostasCariocas[Math.floor(Math.random()*respostasCariocas.length)];
         await sock.sendMessage(from,{ text: resp });
       }
