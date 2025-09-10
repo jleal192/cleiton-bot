@@ -181,13 +181,13 @@ async function startDobby() {
   const MENU_TXT = [
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
-    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE)',
-    '🖼️ .figura — transforma imagem/reply em figurinha',
-    '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel',
-    '📅 .eventos — agenda do rolê',
-    '📣 .todos [mensagem que quer mandar] — menciona geral (grupos)',
-    '🎂 .niver DD/MM — cadastra seu aniversário',
-    '🎂 .meuniver — consulta seu aniversário salvo',
+    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE)\n',
+    '🖼️ .figura — transforma imagem/reply em figurinha\n',
+    '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel\n',
+    '📅 .eventos — agenda do rolê\n',
+    '📣 .todos [mensagem que quer mandar] — menciona geral (grupos)\n',
+    '🎂 .niver DD/MM — cadastra seu aniversário\n',
+    '🎂 .meuniver — consulta seu aniversário salvo\n',
   ].join('\n');
 
   // Comandos
