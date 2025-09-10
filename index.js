@@ -181,13 +181,13 @@ async function startDobby() {
   const MENU_TXT = [
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
-    '🎧 .tocar <música/artista> — toca áudio do YouTube\n',
-    '🖼️ .figura — transforma imagem/reply em figurinha\n',
-    '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel\n',
-    '📅 .eventos — agenda do rolê\n',
-    '📣 .todos [mensagem que quer mandar] — menciona geral (grupos)\n',
-    '🎂 .niver DD/MM — cadastra seu aniversário\n',
-    '🎂 .meuniver — consulta seu aniversário salvo\n',
+    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE)',
+    '🖼️ .figura — transforma imagem/reply em figurinha',
+    '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel',
+    '📅 .eventos — agenda do rolê',
+    '📣 .todos [mensagem que quer mandar] — menciona geral (grupos)',
+    '🎂 .niver DD/MM — cadastra seu aniversário',
+    '🎂 .meuniver — consulta seu aniversário salvo',
   ].join('\n');
 
   // Comandos
@@ -223,68 +223,10 @@ async function startDobby() {
       if (cmd.startsWith('.tocar ')) {
         try {
           const query = text.slice(7).trim();
-          if (!query) {
-            return sock.sendMessage(from, { text: '❗ Use: `.tocar <música/artista>`' });
-          }
-
-          await sock.sendMessage(from, { text: `🎵 Procurando: *${query}*…` });
-
           const { buffer, title } = await baixarPorBusca(query);
-          let audioBuffer = buffer;
-
-          // 🔒 Verifica tamanho
-          if (audioBuffer.length > MAX_BYTES) {
-            const tmpIn = tempFile('.in.mp3');
-            const tmpOut = tempFile('.out.mp3');
-            fs.writeFileSync(tmpIn, audioBuffer);
-
-            try {
-              await execSpawn('ffmpeg', [
-                '-hide_banner',
-                '-loglevel', 'error',
-                '-t', '120',            // corta para 2 min
-                '-i', tmpIn,
-                '-vn',
-                '-ac', '2',
-                '-ar', '44100',
-                '-b:a', '96k',          // bitrate menor
-                '-f', 'mp3',
-                tmpOut,
-              ]);
-
-              audioBuffer = fs.readFileSync(tmpOut);
-              await sock.sendMessage(from, {
-                text: '⚠️ Arquivo muito grande — enviando versão reduzida (~2 min)…',
-              });
-            } catch (err) {
-              console.error('Erro ao cortar áudio:', err);
-            } finally {
-              fs.unlink(tmpIn, () => {});
-              fs.unlink(tmpOut, () => {});
-            }
-          }
-
-          // Envia áudio
-          await sock.sendMessage(from, {
-            audio: audioBuffer,
-            mimetype: 'audio/mpeg',
-          });
-          await sock.sendMessage(from, { text: `🎧 Aqui está: *${title}*` });
-
-        } catch (err) {
-          const msg = String(err?.message || err);
-          console.error('Erro no .tocar:', msg);
-
-          if (/consent|not a bot|410|sign in/i.test(msg)) {
-            await sock.sendMessage(from, {
-              text: '❌ O YouTube bloqueou essa busca.\n↪️ Tente outro título/versão (ao vivo, lyric, etc).',
-            });
-          } else {
-            await sock.sendMessage(from, {
-              text: '❌ Erro ao buscar ou tocar música 😭',
-            });
-          }
-        }
+          await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
+          await sock.sendMessage(from,{ text: `🎧 ${title}` });
+        } catch { sock.sendMessage(from,{ text:'❌ Erro ao tocar' }); }
       }
 
       if (cmd === '.figura') return criarFigurinha(sock, m, from);
