@@ -216,9 +216,15 @@ async function startDobby() {
       if (cmd === '.menu') return sock.sendMessage(from,{ text: MENU_TXT });
 
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
-        const frase = await pegarFraseZen();
-        return sock.sendMessage(from,{ text: frase });
-      }
+  const frase = await pegarFraseZen();
+  const user = m.key.participant || m.key.remoteJid; 
+  const tag = user.split('@')[0]; 
+
+  return sock.sendMessage(from, { 
+    text: `@${tag} ${frase} 💪`, 
+    mentions: [user] 
+  });
+}
 
       if (cmd.startsWith('.tocar ')) {
         try {
