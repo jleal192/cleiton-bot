@@ -217,14 +217,17 @@ async function startDobby() {
 
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
   const frase = await pegarFraseZen();
-  
-  // 🔑 Pega o usuário correto no grupo
-  const user = m.key.participant || from;  
+
+  // sempre pega o número da pessoa que mandou a msg
+  const user = m.key.participant || m.key.remoteJid;  
+
+  console.log("DEBUG USER JID:", user); // 👈 vai mostrar no terminal quem está sendo mencionado
+
   const tag = user.split('@')[0]; 
 
   return sock.sendMessage(from, { 
     text: `@${tag} ${frase} 💪`, 
-    mentions: [user]  // 👈 precisa mandar o array com o JID
+    mentions: [user]  // precisa ser o JID completo, ex: 552199999999@s.whatsapp.net
   });
 }
 
