@@ -218,18 +218,18 @@ async function startDobby() {
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
   const frase = await pegarFraseZen();
 
-  // sempre pega o número da pessoa que mandou a msg
-  const user = m.key.participant || m.key.remoteJid;  
+  // sempre pega o autor da mensagem no grupo
+  const user = m.key.participant;  
 
-  console.log("DEBUG USER JID:", user); // 👈 vai mostrar no terminal quem está sendo mencionado
-
-  const tag = user.split('@')[0]; 
-
-  return sock.sendMessage(from, { 
-    text: `@${tag} ${frase} 💪`, 
-    mentions: [user]  // precisa ser o JID completo, ex: 552199999999@s.whatsapp.net
-  });
+  if (user) {
+    const tag = user.split('@')[0]; 
+    return sock.sendMessage(from, { 
+      text: `@${tag} ${frase} 💪`, 
+      mentions: [user]  // aqui vai o JID completo (ex: 552199999999@s.whatsapp.net)
+    });
+  }
 }
+
 
       if (cmd.startsWith('.tocar ')) {
         try {
