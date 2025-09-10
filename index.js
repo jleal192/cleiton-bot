@@ -217,12 +217,14 @@ async function startDobby() {
 
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
   const frase = await pegarFraseZen();
-  const user = m.key.participant || m.key.remoteJid; 
+  
+  // 🔑 Pega o usuário correto no grupo
+  const user = m.key.participant || from;  
   const tag = user.split('@')[0]; 
 
   return sock.sendMessage(from, { 
     text: `@${tag} ${frase} 💪`, 
-    mentions: [user] 
+    mentions: [user]  // 👈 precisa mandar o array com o JID
   });
 }
 
