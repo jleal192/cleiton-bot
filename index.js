@@ -46,14 +46,18 @@ async function pegarFraseZen() {
     const data = await res.json();
     const en = `${data?.[0]?.q} — ${data?.[0]?.a}`;
 
-    // Traduz via API MyMemory
+    // Traduz via API MyMemory (força PT-BR)
     const tr = await fetch(
       'https://api.mymemory.translated.net/get?q=' +
         encodeURIComponent(en) +
         '&langpair=en|pt-BR'
     );
     const trJson = await tr.json();
-    const translated = trJson?.responseData?.translatedText || en;
+    let translated = trJson?.responseData?.translatedText;
+
+    if (!translated || translated.trim().length < 3) {
+      translated = '💡 Continue firme, você é capaz de vencer qualquer desafio!';
+    }
 
     return `💭 ${translated}`;
   } catch {
@@ -61,39 +65,29 @@ async function pegarFraseZen() {
   }
 }
 
-// Executa comando (spawn)
-function execSpawn(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
-
-    p.stdout.on('data', (d) => (stdout = Buffer.concat([stdout, d])));
-    p.stderr.on('data', (d) => (stderr = Buffer.concat([stderr, d])));
-    p.on('error', reject);
-    p.on('close', (code) => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${cmd} exited with ${code}: ${stderr.toString()}`));
-    });
-  });
-}
-
-// Baixar áudio de um URL do YouTube
-async function baixarAudioMP3(url, maxDurationSec = 150, targetBitrate = '128k') {
+// Baixar áudio (yt-dlp + ffmpeg)
+async function baixarAudioMP3(url, maxDurationSec = 150) {
   const outFile = tempFile('.mp3');
   return new Promise((resolve, reject) => {
-    const ytdlp = spawn('yt-dlp', ['-f','bestaudio','-o','-', url]);
-    const ffmpegProc = spawn('ffmpeg', [
-      '-i','pipe:0','-t',String(maxDurationSec),
-      '-vn','-ac','2','-ar','44100','-b:a',targetBitrate,
-      '-f','mp3',outFile,
+    const ytdlp = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', url]);
+    const ffmpeg = spawn('ffmpeg', [
+      '-i', 'pipe:0',
+      '-t', String(maxDurationSec),
+      '-vn',
+      '-ac', '2',
+      '-ar', '44100',
+      '-b:a', '128k',
+      '-f', 'mp3',
+      outFile,
     ]);
-    ytdlp.stdout.pipe(ffmpegProc.stdin);
-    ffmpegProc.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`ffmpeg falhou`));
+
+    ytdlp.stdout.pipe(ffmpeg.stdin);
+
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) return reject(new Error("ffmpeg falhou"));
       try {
         const buf = fs.readFileSync(outFile);
-        fs.unlink(outFile, () => {});
+        fs.unlinkSync(outFile);
         resolve(buf);
       } catch (err) { reject(err); }
     });
@@ -109,7 +103,7 @@ async function baixarPorBusca(query, tentativaDurSeg = [150, 120, 90]) {
   for (let v of vids.slice(0, 5)) {
     for (const dur of tentativaDurSeg) {
       try {
-        const buf = await baixarAudioMP3(v.url, dur, '128k');
+        const buf = await baixarAudioMP3(v.url, dur);
         if (buf) return { buffer: buf, title: v.title };
       } catch {}
     }
@@ -181,7 +175,7 @@ async function startDobby() {
   const MENU_TXT = [
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
-    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE)\n',
+    '🎧 .tocar <música/artista> — baixa e toca música direto do YouTube\n',
     '🖼️ .figura — transforma imagem/reply em figurinha\n',
     '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel\n',
     '📅 .eventos — agenda do rolê\n',
@@ -226,7 +220,10 @@ async function startDobby() {
           const { buffer, title } = await baixarPorBusca(query);
           await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
           await sock.sendMessage(from,{ text: `🎧 ${title}` });
-        } catch { sock.sendMessage(from,{ text:'❌ Erro ao tocar' }); }
+        } catch (err) {
+          console.error("Erro no .tocar:", err.message);
+          sock.sendMessage(from,{ text:'❌ Erro ao tocar, tenta outro nome/título' });
+        }
       }
 
       if (cmd === '.figura') return criarFigurinha(sock, m, from);
