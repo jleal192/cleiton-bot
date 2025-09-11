@@ -1,6 +1,6 @@
-// Dobby Bot — versão yt-dlp + ffmpeg (sem play-dl / ytdl-core)
-// Stack: Baileys + yt-dlp + ffmpeg + sharp
-// Observação: certifique-se de ter yt-dlp e ffmpeg instalados no servidor.
+// Dobby Bot — versão yt-dlp + ffmpeg (robusta)
+// Stack: Baileys + yt-dlp + ffmpeg + sharp + node-cron
+// Requisitos no servidor: ffmpeg e yt-dlp (ou python3 -m yt_dlp) instalados.
 
 const {
   default: makeWASocket,
@@ -12,42 +12,93 @@ const {
 const fetch = require('node-fetch');
 const ytSearch = require('yt-search');
 const sharp = require('sharp');
+const qrcode = require('qrcode-terminal');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const cron = require('node-cron');
 
-// Evita warning de MaxListenersExceeded
 require('events').defaultMaxListeners = 30;
 
 const MAX_MB = 16;
 const MAX_BYTES = MAX_MB * 1024 * 1024;
+const niversPath = path.join(__dirname, "nivers.json");
 
 // ==== Helpers ================================================================
-
 function tempFile(suffix = '') {
   const name = `dobby_${Date.now()}_${Math.random().toString(36).slice(2)}${suffix}`;
   return path.join(os.tmpdir(), name);
 }
 
+// Resolve caminho do yt-dlp (ajuda quando PM2 não tem PATH completo)
+function getYtDlpPath() {
+  if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) {
+    return process.env.YTDLP_PATH;
+  }
+  const candidates = [
+    '/usr/local/bin/yt-dlp',
+    '/usr/bin/yt-dlp',
+    path.join(os.homedir(), '.local/bin/yt-dlp'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return 'yt-dlp'; // confia no PATH
+}
+
+// Se o arquivo final passar de 16MB, re-encode para bitrate menor
+function transcodeIfTooBig(inPath, maxBytes, bitrate = '96k') {
+  return new Promise((resolve, reject) => {
+    const stats = fs.statSync(inPath);
+    if (stats.size <= maxBytes) return resolve(inPath);
+
+    const outPath = inPath.replace(/\.mp3$/i, `.shrunk.mp3`);
+    const ff = spawn('ffmpeg', ['-y', '-i', inPath, '-vn', '-b:a', bitrate, outPath]);
+    let err = '';
+    ff.stderr.on('data', d => err += d.toString());
+    ff.on('close', code => {
+      if (code !== 0) return reject(new Error('ffmpeg transcode falhou: ' + err.slice(-400)));
+      try {
+        const s2 = fs.statSync(outPath);
+        if (s2.size > maxBytes) {
+          return reject(new Error(`Arquivo ainda > ${MAX_MB}MB mesmo após transcode.`));
+        }
+        fs.unlinkSync(inPath);
+        resolve(outPath);
+      } catch (e) { reject(e); }
+    });
+  });
+}
+
+// Carregar/salvar aniversários
+function carregarNivers() {
+  if (!fs.existsSync(niversPath)) return {};
+  return JSON.parse(fs.readFileSync(niversPath, "utf8"));
+}
+function salvarNivers(data) {
+  fs.writeFileSync(niversPath, JSON.stringify(data, null, 2));
+}
+
 // Frase motivacional em PT-BR
 async function pegarFraseZen() {
   try {
-    const res = await fetch('https://zenquotes.io/api/random', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (DobbyBot)' },
-      timeout: 12_000,
-    });
+    const res = await fetch('https://zenquotes.io/api/random');
     const data = await res.json();
     const en = `${data?.[0]?.q} — ${data?.[0]?.a}`;
 
-    // traduz para PT-BR via API livre
+    // Traduz via API MyMemory (força PT-BR)
     const tr = await fetch(
       'https://api.mymemory.translated.net/get?q=' +
         encodeURIComponent(en) +
         '&langpair=en|pt-BR'
     );
     const trJson = await tr.json();
-    const translated = trJson?.responseData?.translatedText || en;
+    let translated = trJson?.responseData?.translatedText;
+
+    if (!translated || translated.trim().length < 3) {
+      translated = '💡 Continue firme, você é capaz de vencer qualquer desafio!';
+    }
 
     return `💭 ${translated}`;
   } catch {
@@ -55,166 +106,145 @@ async function pegarFraseZen() {
   }
 }
 
-// Executa comando (spawn)
-function execSpawn(cmd, args, opts = {}) {
+// Baixar áudio (yt-dlp -> mp3) com log do erro + fallback + re-encode se > 16MB
+async function baixarAudioMP3(url) {
+  const ytdlpBin = getYtDlpPath();
+  const tmpDir = os.tmpdir();
+  const template = path.join(tmpDir, `dobby_%(id)s.%(ext)s`);
+
+  // 🔽 NOVO: detectar cookies do env ou cookies.txt local
+  const cookiesPath = process.env.YTDLP_COOKIES || path.join(__dirname, 'cookies.txt');
+  const hasCookies = fs.existsSync(cookiesPath);
+
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
-
-    p.stdout.on('data', (d) => (stdout = Buffer.concat([stdout, d])));
-    p.stderr.on('data', (d) => (stderr = Buffer.concat([stderr, d])));
-    p.on('error', reject);
-    p.on('close', (code) => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${cmd} exited with ${code}: ${stderr.toString()}`));
-    });
-  });
-}
-
-// Baixar áudio de um URL do YouTube (com suporte a cookies.txt)
-async function baixarAudioMP3(url, maxDurationSec = 150, targetBitrate = '128k') {
-  const cookiesPath = path.join(__dirname, 'cookies.txt');
-
-  const ytdlpArgs = [
-    '-f',
-    'bestaudio/best',
-    '--no-playlist',
-    '--geo-bypass',
-    '--force-ipv4',
-    '--no-warnings',
-    ...(fs.existsSync(cookiesPath) ? ['--cookies', cookiesPath] : []), // usa cookies se existir
-    '-o',
-    '-',
-    url,
-  ];
-
-  const userAgent =
-    process.env.YTDLP_USER_AGENT ||
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
-
-  const outFile = tempFile('.mp3');
-  return new Promise((resolve, reject) => {
-    const ytdlp = spawn('yt-dlp', ytdlpArgs, {
-      env: { ...process.env, HTTP_USER_AGENT: userAgent },
-    });
-
-    const ffmpegArgs = [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-i',
-      'pipe:0',
-      '-t',
-      String(maxDurationSec),
-      '-vn',
-      '-ac',
-      '2',
-      '-ar',
-      '44100',
-      '-b:a',
-      targetBitrate,
-      '-f',
-      'mp3',
-      outFile,
+    const args = [
+      '-x', '--audio-format', 'mp3',
+      '--no-playlist',
+      '--audio-quality', '5',          // VBR moderado => arquivos menores
+      '--restrict-filenames',
+      '-o', template,
+      '--print', 'after_move:filepath',// imprime caminho final do mp3
+      '--no-progress',
+      // 🔽 NOVO: aplicar cookies se existir
+      ...(hasCookies ? ['--cookies', cookiesPath] : []),
+      url
     ];
-    const ffmpegProc = spawn('ffmpeg', ffmpegArgs);
 
-    let stderrF = '';
-    ytdlp.stderr.on('data', () => {});
-    ffmpegProc.stderr.on('data', (d) => (stderrF += d.toString()));
+    let stdout = '', stderr = '';
+    const y = spawn(ytdlpBin, args);
 
-    ytdlp.stdout.pipe(ffmpegProc.stdin);
+    y.stdout.on('data', d => stdout += d.toString());
+    y.stderr.on('data', d => stderr += d.toString());
 
-    ffmpegProc.on('close', (code) => {
+    // Se falhar em spawnar o binário, tenta via python3 -m yt_dlp
+    y.on('error', () => {
+      const y2 = spawn('python3', ['-m', 'yt_dlp', ...args]);
+      y2.stdout.on('data', d => stdout += d.toString());
+      y2.stderr.on('data', d => stderr += d.toString());
+      y2.on('close', async (code) => {
+        if (code !== 0) return reject(new Error('yt-dlp falhou: ' + stderr.slice(-400)));
+        try {
+          const outPath = stdout.trim().split('\n').pop();
+          const finalPath = await transcodeIfTooBig(outPath, MAX_BYTES, '96k');
+          const buf = fs.readFileSync(finalPath);
+          fs.unlinkSync(finalPath);
+          resolve(buf);
+        } catch (e) { reject(e); }
+      });
+    });
+
+    y.on('close', async (code) => {
+      if (code !== 0) return reject(new Error('yt-dlp falhou: ' + stderr.slice(-400)));
       try {
-        ytdlp.kill('SIGKILL');
-      } catch {}
-      if (code !== 0) return reject(new Error(`ffmpeg falhou: ${stderrF}`));
-      try {
-        const buf = fs.readFileSync(outFile);
-        fs.unlink(outFile, () => {});
+        const outPath = stdout.trim().split('\n').pop();
+        const finalPath = await transcodeIfTooBig(outPath, MAX_BYTES, '96k');
+        const buf = fs.readFileSync(finalPath);
+        fs.unlinkSync(finalPath);
         resolve(buf);
-      } catch (err) {
-        reject(err);
-      }
+      } catch (e) { reject(e); }
     });
   });
 }
 
-// Buscar no YouTube e tentar baixar
-async function baixarPorBusca(query, tentativaDurSeg = [150, 120, 90]) {
+// Buscar no YouTube e baixar áudio
+async function baixarPorBusca(query) {
   const result = await ytSearch(query);
   const vids = (result && result.videos) || [];
   if (!vids.length) throw new Error('Nenhum vídeo encontrado');
 
-  const maxCandidates = Math.min(6, vids.length);
-  let lastErr = null;
-
-  for (let i = 0; i < maxCandidates; i++) {
-    const v = vids[i];
-    for (const dur of tentativaDurSeg) {
-      try {
-        const buf = await baixarAudioMP3(v.url, dur, '128k');
-        if (buf && buf.length > 0)
-          return { buffer: buf, title: v.title, url: v.url };
-      } catch (e) {
-        lastErr = e;
-      }
+  for (const v of vids.slice(0, 3)) { // tenta até 3 resultados
+    try {
+      const buf = await baixarAudioMP3(v.url);
+      if (buf) return { buffer: buf, title: v.title };
+    } catch (err) {
+      console.error(`Erro ao baixar ${v.title}:`, err.message);
     }
   }
-  throw lastErr || new Error('Falhou em todas as tentativas');
+  throw new Error("Falha ao baixar áudio");
 }
 
 // Criar figurinha
 async function criarFigurinha(sock, m, from) {
-  let buffer;
-
-  if (m.message?.imageMessage) {
-    const stream = await downloadContentFromMessage(
-      m.message.imageMessage,
-      'image'
-    );
-    buffer = Buffer.concat([]);
-    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+  try {
+    let buffer;
+    if (m.message?.imageMessage) {
+      const stream = await downloadContentFromMessage(m.message.imageMessage, 'image');
+      buffer = Buffer.concat([]);
+      for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+    }
+    if (!buffer && m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
+      const quoted = m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
+      const stream = await downloadContentFromMessage(quoted, 'image');
+      buffer = Buffer.concat([]);
+      for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+    }
+    if (!buffer) return sock.sendMessage(from, { text: '❌ Nenhuma imagem encontrada 😅' });
+    const webpBuffer = await sharp(buffer).webp({ quality: 90 }).toBuffer();
+    await sock.sendMessage(from, { sticker: webpBuffer });
+    await sock.sendMessage(from, { text: '🪄 Figurinha criada!' });
+  } catch (err) {
+    console.error("Erro no .figura:", err.message);
+    sock.sendMessage(from, { text: '❌ Erro ao criar figurinha.' });
   }
-
-  if (
-    !buffer &&
-    m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage
-  ) {
-    const quoted =
-      m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
-    const stream = await downloadContentFromMessage(quoted, 'image');
-    buffer = Buffer.concat([]);
-    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-  }
-
-  if (!buffer || buffer.length === 0) {
-    await sock.sendMessage(from, { text: '❌ Nenhuma imagem encontrada 😅' });
-    return;
-  }
-
-  const webpBuffer = await sharp(buffer).webp({ quality: 90 }).toBuffer();
-  await sock.sendMessage(from, { sticker: webpBuffer });
-  await sock.sendMessage(from, { text: '🪄 Figurinha criada!' });
 }
 
-// ==== Bot ====================================================================
+// ==== Extras ================================================================
+const respostasCariocas = [
+  "🚨 Qual foi? Tá de caô comigo não, né?",
+  "👀 Ih, me marca não... cuidado que o Dobby é cria!",
+  "🔥 Fala comigo! O que tu quer?",
+  "😂 Tá viajando na maionese?",
+  "🫡 Respeita o Dobby, cria de Madureira!",
+  "😎 Ihh... tu tá querendo arrumar caô, é?",
+  "💥 Fala tu! Qual é a boa?",
+  "Não tem mais o que fazer, não?",
+  "Agora eu não posso, estou trabalhando.",
+];
+const frasesSaida = [
+  "😢 Que coisa feia, saiu... são 10 anos sem sexo agora!",
+  "🚪 Porta da rua é serventia da casa... mas vai fazer falta, será? 👋",
+  "👻 Saiu de fininho igual gasparzinho!",
+  "🫠 Abandonou a gente... fraquejou, fraquejou!",
+  "😂 Quem sai do grupo perde 50% do tesão automaticamente!",
+];
+const saiuRecentemente = new Set();
+const ultimoPrivado = {}; // { userId: 'YYYY-MM-DD' }
 
+// ==== Bot ====================================================================
 async function startDobby() {
   const { state, saveCreds } = await useMultiFileAuthState('dobby_auth');
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
-  });
+  const sock = makeWASocket({ auth: state }); // sem printQRInTerminal (deprecated)
 
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log('📱 Escaneie o QR abaixo:');
+      qrcode.generate(qr, { small: true });
+    }
+
     if (connection === 'close') {
-      const reason =
-        lastDisconnect?.error?.output?.statusCode ||
-        lastDisconnect?.error?.message;
+      const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message;
       console.log(`⚠️ Conexão fechada: ${reason}`);
       if (reason !== DisconnectReason.loggedOut) {
         console.log('🔁 Tentando reconectar...');
@@ -224,28 +254,18 @@ async function startDobby() {
       console.log('✅ Conectado ao WhatsApp!');
     }
   });
-
   sock.ev.on('creds.update', saveCreds);
 
-  // Menu e Ajuda
   const MENU_TXT = [
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
-    '⚡ .ping — teste de vida',
-    '🎧 .tocar <música/artista> — NÃO FUNCIONA (EM BREVE)',
-    '🖼️ .figura — transforma imagem/reply em figurinha',
-    '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel',
-    '📅 .eventos — agenda do rolê',
-    '📣 .todos [mensagem] — menciona geral (grupos)',
-  ].join('\n');
-
-  const HELP_TXT = [
-    '🆘 **Ajuda do Dobby**',
-    '━━━━━━━━━━━━━━',
-    '• Use `.tocar` com nome da música/artista. Ex: `.tocar pentatonix hallelujah`',
-    '• Para `.figura`, envie uma imagem ou responda uma imagem com `.figura`',
-    `• Limite de tamanho de áudio: ${MAX_MB} MB (~2:30 min).`,
-    '• Em grupo, `.todos Sua mensagem` chama a tropa inteira.',
+    '🎧 .tocar <artista - nome da música> — baixa e toca música direto do YouTube\n',
+    '🖼️ .figura — transforma imagem/reply em figurinha\n',
+    '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel\n',
+    '📅 .eventos — agenda do rolê\n',
+    '📣 .todos [mensagem que quer mandar] — menciona geral (grupos, SÓ ADM)\n',
+    '🎂 .niver DD/MM — cadastra seu aniversário\n',
+    '🎂 .meuniver — consulta seu aniversário salvo\n',
   ].join('\n');
 
   // Comandos
@@ -254,173 +274,130 @@ async function startDobby() {
     if (!m || !m.message || m.key.fromMe) return;
 
     const from = m.key.remoteJid;
-    const text =
-      m.message?.conversation ||
-      m.message?.extendedTextMessage?.text ||
-      m.message?.imageMessage?.caption ||
-      '';
+    const text = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || '';
     const cmd = text.trim().toLowerCase();
 
+    // 🔒 Privado (só uma vez por dia)
+    if (!from.endsWith("@g.us")) {
+      const user = from;
+      const hoje = new Date().toISOString().slice(0,10);
+      if (ultimoPrivado[user] !== hoje) {
+        ultimoPrivado[user] = hoje;
+        await sock.sendMessage(from, {
+          text: "⚡ E aí, veio fuçar a vida do Dobby? Vou logo avisando que meu criador(a) não deixa eu abrir o bico 🤐. Agora, se tu quiser dar uma sugestão braba, manda aí que depois eu vejo... mas na moral, não enche que hoje eu tô na folga 😴🍻"
+        });
+      }
+      return;
+    }
+
     try {
-      if (cmd === '.ping') {
-        await sock.sendMessage(from, { text: '🏓 Pong! Dobby online.' });
-        return;
-      }
-      if (cmd === '.menu') {
-        await sock.sendMessage(from, { text: MENU_TXT });
-        return;
-      }
-      if (cmd === '.help') {
-        await sock.sendMessage(from, { text: HELP_TXT });
-        return;
-      }
+      if (cmd === '.menu') return sock.sendMessage(from,{ text: MENU_TXT });
 
       if (['.bomdia', '.boatarde', '.boanoite', '.boamadrugada'].includes(cmd)) {
         const frase = await pegarFraseZen();
-        const mention = m.key.participant || m.participant || m.pushName;
-        const tag = mention?.split('@')?.[0];
-        await sock.sendMessage(from, {
-          text: `@${tag} ${frase} 💪`,
-          mentions: mention ? [mention] : [],
-        });
-        return;
+        return sock.sendMessage(from,{ text: frase });
       }
 
       if (cmd.startsWith('.tocar ')) {
-        const query = text.slice(7).trim();
-        if (!query) {
-          await sock.sendMessage(from, {
-            text: '❗ Use: `.tocar <música/artista>`',
-          });
-          return;
-        }
-        await sock.sendMessage(from, { text: `🎵 Procurando: *${query}*…` });
-
         try {
+          const query = text.slice(7).trim();
           const { buffer, title } = await baixarPorBusca(query);
-
-          let audioBuffer = buffer;
-          if (audioBuffer.length > MAX_BYTES) {
-            const tmpIn = tempFile('.in.mp3');
-            const tmpOut = tempFile('.out.mp3');
-            fs.writeFileSync(tmpIn, audioBuffer);
-            await execSpawn('ffmpeg', [
-              '-hide_banner',
-              '-loglevel',
-              'error',
-              '-t',
-              '90',
-              '-i',
-              tmpIn,
-              '-vn',
-              '-ac',
-              '2',
-              '-ar',
-              '44100',
-              '-b:a',
-              '96k',
-              '-f',
-              'mp3',
-              tmpOut,
-            ]);
-            audioBuffer = fs.readFileSync(tmpOut);
-            fs.unlink(tmpIn, () => {});
-            fs.unlink(tmpOut, () => {});
-            await sock.sendMessage(from, {
-              text: '⚠️ Arquivo grande — enviando versão reduzida (1:30 min)…',
-            });
-          }
-
-          await sock.sendMessage(from, {
-            audio: audioBuffer,
-            mimetype: 'audio/mpeg',
-          });
-          await sock.sendMessage(from, { text: `🎧 Aqui está: *${title}*` });
+          await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
+          await sock.sendMessage(from,{ text: `🎧 ${title}` });
         } catch (err) {
-          const msg = String(err?.message || err);
-          if (/consent|not a bot|410|sign in/i.test(msg)) {
-            await sock.sendMessage(from, {
-              text: '❌ O YouTube bloqueou essa busca.\n↪️ Tente outro título/versão (ao vivo, lyric, etc).',
-            });
-          } else {
-            await sock.sendMessage(from, {
-              text: '❌ Erro ao buscar ou tocar música 😭',
-            });
-          }
-          console.error('Erro no .tocar:', msg);
+          console.error("Erro no .tocar:", err.message);
+          sock.sendMessage(from,{ text:'❌ Erro ao tocar (pode ser vídeo muito longo, bloqueado ou ffmpeg/yt-dlp fora do PATH). Tenta outro nome/título.' });
         }
-        return;
       }
 
-      if (cmd === '.figura') {
-        try {
-          await criarFigurinha(sock, m, from);
-        } catch (err) {
-          console.error('Erro no .figura:', err?.message || err);
-          await sock.sendMessage(from, {
-            text: '❌ Deu erro criando a figurinha 😭',
-          });
-        }
-        return;
-      }
+      if (cmd === '.figura') return criarFigurinha(sock, m, from);
 
       if (cmd === '.eventos') {
         const eventos = [
-          '📅 **Agenda do rolê**',
+          '📅 **Agenda da semana**',
           '━━━━━━━━━━━━━━',
-          '💪 Segunda: Começar no gás!',
-          '😎 Quinta: Quintas Intenções — quase sexta!',
-          '🍻 Sexta: Happy Hour + divulgação de projetos!',
-          '🌳 Sábado & Domingo: Encontrão no Parque de Madureira',
+          '💪 Segunda: Começar no gás!\n',
+          '😎 Quinta: Quintas Intenções — quase sexta!\n',
+          '🍻 Sexta: Happy Hour + Divulga aí seu trampo!\n',
+          '🌳 Sábado & Domingo: 16h - DECK MADUREIRA - Rua Soares Caldeira, ao lado do shopping de Madureira!\n',
         ].join('\n');
-        await sock.sendMessage(from, { text: eventos });
-        return;
+        return sock.sendMessage(from, { text: eventos });
       }
 
       if (cmd.startsWith('.todos')) {
         try {
           const metadata = await sock.groupMetadata(from);
           const participants = metadata.participants.map((p) => p.id);
-          const mensagem =
-            text.replace('.todos', '').trim() ||
-            '📢 Bora todo mundo ouvir o Dobby!';
+          const mensagem = text.replace('.todos', '').trim() || '📢 Bora todo mundo ouvir o Dobby!';
           await sock.sendMessage(from, { text: mensagem, mentions: participants });
-        } catch {
-          await sock.sendMessage(from, {
-            text: '❌ Esse comando só funciona em grupos.',
-          });
-        }
-        return;
+        } catch { await sock.sendMessage(from, { text: '❌ Esse comando só funciona em grupos.' }); }
       }
 
-      if (cmd === '.tocar') {
-        await sock.sendMessage(from, {
-          text: '❗ Use: `.tocar <música/artista>`',
-        });
+      if (cmd.startsWith('.niver ')) {
+        const partes = text.split(" ");
+        let alvo = m.key.participant || m.key.remoteJid;
+        let data;
+        const metadata = await sock.groupMetadata(from);
+        const isAdmin = metadata.participants.find(p=>p.id===m.key.participant && (p.admin==='admin'||p.admin==='superadmin'));
+        if (partes.length === 3 && partes[1].startsWith('@')) {
+          if (!isAdmin) return sock.sendMessage(from,{ text:"❌ Só admin pode cadastrar aniversário de outros" });
+          alvo = partes[1].replace('@','') + "@s.whatsapp.net";
+          data = partes[2];
+        } else {
+          data = partes[1];
+        }
+        if (!/^\d{2}\/\d{2}$/.test(data)) return sock.sendMessage(from,{ text:"❌ Formato inválido. Use `.niver 25/12`" });
+        const nivers = carregarNivers(); nivers[alvo] = data; salvarNivers(nivers);
+        return sock.sendMessage(from,{ text:`🎉 Aniversário de ${alvo} salvo: ${data}` });
       }
-    } catch (e) {
-      console.error('Erro geral:', e?.message || e);
+
+      if (cmd === '.meuniver') {
+        const user = m.key.participant || m.key.remoteJid;
+        const nivers = carregarNivers();
+        return sock.sendMessage(from,{ text: nivers[user] ? `🎂 Seu aniversário: ${nivers[user]}` : "❌ Você não cadastrou. Use `.niver DD/MM`" });
+      }
+
+      // Carioca bolado (se marcar o Dobby no grupo)
+      const mentions = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+      if (mentions.some(jid => jid.includes(sock.user.id.split(':')[0]))) {
+        const resp = respostasCariocas[Math.floor(Math.random()*respostasCariocas.length)];
+        await sock.sendMessage(from,{ text: resp });
+      }
+
+    } catch (e) { console.error('Erro geral:', e?.message || e); }
+  });
+
+  // Entrada/saída
+  sock.ev.on("group-participants.update", async (update) => {
+    for (const participant of update.participants) {
+      const nome = `@${participant.split("@")[0]}`;
+      if (update.action === "add") {
+        if (saiuRecentemente.has(participant)) {
+          await sock.sendMessage(update.id,{ text:`👊 E aê ${nome}, voltou pro melhor grupo do Errejota! 😎🍻`, mentions:[participant] });
+          saiuRecentemente.delete(participant);
+        } else {
+          await sock.sendMessage(update.id,{ text:`👋 Bem-vindo @${participant.split('@')[0]} ao grupo *${(await sock.groupMetadata(update.id)).subject}*! 🎉`, mentions:[participant] });
+        }
+      } else if (update.action === "remove") {
+        saiuRecentemente.add(participant);
+        setTimeout(()=>saiuRecentemente.delete(participant),24*60*60*1000);
+        const frase = frasesSaida[Math.floor(Math.random() * frasesSaida.length)];
+        await sock.sendMessage(update.id,{ text: `${frase} ${nome}`, mentions:[participant] });
+      }
     }
   });
 
-  sock.ev.on('group-participants.update', async (update) => {
-    try {
-      const metadata = await sock.groupMetadata(update.id);
-      for (const participant of update.participants) {
-        if (update.action === 'add') {
-          await sock.sendMessage(update.id, {
-            text: `👋 Bem-vindo @${participant.split('@')[0]} ao grupo *${metadata.subject}*! 🎉`,
-            mentions: [participant],
-          });
-        } else if (update.action === 'invite') {
-          await sock.sendMessage(update.id, {
-            text: `🙌 Olha quem voltou! @${participant.split('@')[0]} 😏`,
-            mentions: [participant],
-          });
+  // Cron de parabéns
+  cron.schedule("0 9 * * *", async () => {
+    const hoje = new Date().toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"});
+    const nivers = carregarNivers();
+    for (const [user,data] of Object.entries(nivers)) {
+      if (data === hoje) {
+        const grupos = await sock.groupFetchAllParticipating();
+        for (const jid of Object.keys(grupos)) {
+          await sock.sendMessage(jid,{ text:`🎉 Hoje é aniversário de @${user.split("@")[0]} 🎂 Parabéns Firezete! 🥳🔥🍻`, mentions:[user] });
         }
       }
-    } catch (err) {
-      console.error(err);
     }
   });
 }
