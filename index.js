@@ -112,9 +112,18 @@ async function baixarAudioMP3(url) {
   const tmpDir = os.tmpdir();
   const template = path.join(tmpDir, `dobby_%(id)s.%(ext)s`);
 
-  // 🔽 NOVO: detectar cookies do env ou cookies.txt local
-  const cookiesPath = process.env.YTDLP_COOKIES || path.join(__dirname, 'cookies.txt');
-  const hasCookies = fs.existsSync(cookiesPath);
+  // Detecta cookies do env ou arquivos comuns na pasta
+  const cookieCandidates = [
+    process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim(),
+    path.join(__dirname, 'cookies.txt'),
+    path.join(__dirname, 'cookie.txt'),
+    path.join(__dirname, 'youtube.com_cookies.txt'),
+  ].filter(Boolean);
+  let cookiesPath;
+  for (const c of cookieCandidates) {
+    try { if (fs.existsSync(c)) { cookiesPath = c; break; } } catch {}
+  }
+  const hasCookies = Boolean(cookiesPath);
 
   return new Promise((resolve, reject) => {
     const args = [
@@ -125,7 +134,6 @@ async function baixarAudioMP3(url) {
       '-o', template,
       '--print', 'after_move:filepath',// imprime caminho final do mp3
       '--no-progress',
-      // 🔽 NOVO: aplicar cookies se existir
       ...(hasCookies ? ['--cookies', cookiesPath] : []),
       url
     ];
@@ -259,11 +267,11 @@ async function startDobby() {
   const MENU_TXT = [
     '🧙‍♂️ **Dobby Menu**',
     '━━━━━━━━━━━━━━',
-    '🎧 .tocar <artista - nome da música> — baixa e toca música direto do YouTube\n',
+    '🎧 .tocar <artista - nome da música ou link> — baixa e toca do YouTube\n',
     '🖼️ .figura — transforma imagem/reply em figurinha\n',
     '🌞 .bomdia | .boatarde | .boanoite | .boamadrugada — frases estilo Mabel\n',
     '📅 .eventos — agenda do rolê\n',
-    '📣 .todos [mensagem que quer mandar] — menciona geral (grupos, SÓ ADM)\n',
+    '📣 .todos [mensagem] — menciona geral (grupos)\n',
     '🎂 .niver DD/MM — cadastra seu aniversário\n',
     '🎂 .meuniver — consulta seu aniversário salvo\n',
   ].join('\n');
@@ -301,9 +309,18 @@ async function startDobby() {
       if (cmd.startsWith('.tocar ')) {
         try {
           const query = text.slice(7).trim();
-          const { buffer, title } = await baixarPorBusca(query);
-          await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
-          await sock.sendMessage(from,{ text: `🎧 ${title}` });
+
+          // Se for link do YouTube, baixa direto; senão, busca e baixa
+          const isUrl = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(query);
+          if (isUrl) {
+            const buffer = await baixarAudioMP3(query);
+            await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
+            await sock.sendMessage(from,{ text: `🎧 Prontinho!` });
+          } else {
+            const { buffer, title } = await baixarPorBusca(query);
+            await sock.sendMessage(from,{ audio: buffer, mimetype: 'audio/mpeg' });
+            await sock.sendMessage(from,{ text: `🎧 ${title}` });
+          }
         } catch (err) {
           console.error("Erro no .tocar:", err.message);
           sock.sendMessage(from,{ text:'❌ Erro ao tocar (pode ser vídeo muito longo, bloqueado ou ffmpeg/yt-dlp fora do PATH). Tenta outro nome/título.' });
